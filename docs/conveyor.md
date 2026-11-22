@@ -7,6 +7,10 @@ one round) raised 11 findings; all were checked and fixed, marked
 Agent decisions A1–A30 (2026-11-22) close the open questions, and the
 [Verify before code](#verify-before-code) checks were run on 2026-11-22;
 the person may override any agent decision.
+**Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
+built standalone, without Guild; v1 is split into the stages under
+[v1 in stages](#v1-in-stages-without-guild) — proposed, waiting for the
+person's agreement before stage 1 starts.**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -169,6 +173,13 @@ Answered by the person one by one; not re-opened here.
   `tasks.toml`; a field in the task overrides it; the choice is shown and
   changeable at launch. Automatic choice by the dispatcher is not in the
   design (Later).
+- **C12 — standalone, without Guild (2026-11-22).** The person splits
+  Guild into a server and clients meanwhile; the conveyor must work on its
+  own first, so the whole can be seen separately. Nothing in v1 needs Guild
+  running, its CLI or its socket. Guild later becomes one more client of
+  the service API (like the web and the TUI). Where this document names a
+  Guild action in v1, the standalone replacement in
+  [v1 in stages](#v1-in-stages-without-guild) applies.
 - **C11 — scope of the first version (2026-11-22).**
   **v1:** the run loop + Telegram — board (web on localhost + TUI), launching
   ready tasks into worktrees, background agents, the inbox with forms, the
@@ -522,7 +533,149 @@ session id.
 | v2 | Ideas and grilling through forms (with "Continue in terminal"); intake on `intake/<id>` and Approve into main (C9); the web outside through the VPS (C5, C7). |
 | Later | Mobile app (PWA first); dispatcher model choice; Linux-server mode like agterm-server (deferred: Guild builds only on macOS); Guild UI buttons (need Penpot first); attaching to a background session's live terminal. |
 
+## v1 in stages, without Guild
+
+Proposed 2026-11-22 (agent proposal under C12, not yet agreed). v1 is too
+big for one merge, so it is built in seven stages; each one ends with
+something the person can run, test on fixtures and check by hand, and each
+is reviewed like phase 0 (revust `codex-only`, at most 2 rounds). The
+order puts one harness end to end first and widens later.
+
+### Without Guild
+
+| Where the design names Guild | Standalone in v1 |
+| --- | --- |
+| "Open the worktree in Guild" | **Open the worktree**: the card shows the path and copies `cd <worktree>`; the web offers `open <worktree>` (Finder) and the configured editor command. |
+| "Continue in terminal" in Guild (A2) | The card shows the exact resume command for the session (`claude --resume <id>`, `codex resume <id>`, `opencode --session <id>`) in the worktree. Pressing **Continue in terminal** hands over: the service stops its runner, marks the session "continued in terminal" and removes `harness.session` from the state file, so the status is `unknown` until the task is handed back or reviewed (`taskmoor review` from the person's terminal works as in phase 0). |
+| Harness status from `guild agent list` | Not used by the service: it is the launcher and knows its own sessions. The phase-0 Guild source stays in the CLI/TUI and is inert without `GUILD_SOCKET`; sessions the service runs always carry `harness.session`, so a Guild agent never shadows them. |
+| Plan usage "read as Guild reads it" (F11) | Implemented in taskmoor itself (stage 6), with the same sources; Guild's code is only the reference. |
+| Guild as a client | Later, over the same service API as the web and the TUI. |
+
+### Stage 1 — the service and one Claude session
+
+The smallest loop that runs a real agent on a real task.
+
+- `taskmoor serve` runs in the foreground (launchd later), one instance per
+  user (`flock` on the store), listening on `127.0.0.1` (port from the
+  config, default `7733`). A random API token in the store (mode 0600)
+  guards the API; CLI clients read it, browsers get it in stage 2.
+- **Config and store.** `$XDG_CONFIG_HOME/taskmoor/config.toml` (default
+  `~/.config/…`): projects, profiles (`name`, `harness`, `model`,
+  `api_billing`), `default_profile`, port. Store
+  `$XDG_STATE_HOME/taskmoor/` (default `~/.local/state/…`): session journals
+  (JSONL, A18), pending asks, the token. `TASKMOOR_HOME` overrides both for
+  tests.
+- **Projects.** `taskmoor project add PATH`, `project list`, `project
+  remove NAME` (the config only; nothing in the repository).
+- **Run.** `taskmoor run ID [--project P] [--profile NAME]` asks the
+  service to: re-derive readiness, create the worktree
+  `<repo-dir>-<id-lowercase>` on `task/<ID>-<slug>` from the local main
+  (A23), `claim` it under the lock with `--session` (writer
+  `taskmoor serve <version>`, A6), start the runner with the task body as
+  the assignment. A `needs_person` task needs `--person` (A4).
+- **Claude runner** only (C2, A15, A30): `claude -p --input-format
+  stream-json --output-format stream-json --verbose --session-id <uuid>
+  --permission-prompt-tool stdio`, settings with a `PreToolUse` hook (a
+  `taskmoor hook` subcommand) that defers `AskUserQuestion`; API-key
+  variables stripped; refuses a profile whose Claude settings set
+  `apiKeyHelper`; stops the session if `system/init.apiKeySource` is not
+  `none`.
+- **Permissions without the dispatcher.** The fixed rules of A13 only:
+  push/publish/deploy and merges into main are rejected without asking
+  (A11); deletions outside the worktree, secret paths and dependency
+  manifests go to the person; other tool calls inside the worktree are
+  allowed. Everything the rules send to the person and every question waits
+  in the **inbox**.
+- **Journal and state.** Session states and activities as in
+  [Session journal](#session-journal-and-its-activity-model); the state
+  file's `harness` record follows them (the mapping table there). When the
+  session completes, lifecycle becomes `review`; no revust yet.
+- **CLI as the first client.** `taskmoor sessions`, `taskmoor feed ID
+  [--follow]`, `taskmoor inbox`, `taskmoor answer ASK OPTION|--text T`,
+  `taskmoor stop ID`, `taskmoor say ID TEXT` (an instruction), all with
+  `--json`.
+- **API.** HTTP + JSON: `GET /api/snapshot`, `GET /api/events` (server-sent
+  events, deltas numbered `(epoch, rev)`, C5's protocol), `POST` commands.
+- **Tests** with a fake `claude` (a test binary speaking recorded
+  stream-json) on fixture repositories; no provider is called by tests. The
+  real check runs one short subscription session on a throwaway repository,
+  with the person's permission at that time.
+
+### Stage 2 — web on localhost and the TUI as a client
+
+- The web UI served by `taskmoor serve`: the board with the conveyor's
+  columns (Backlog, Ready, Running, **Needs you**, Review, Merged, Done),
+  the project switcher, the card with the session feed, Run / Stop / Add an
+  instruction / Open the worktree / Continue in terminal, the inbox with
+  forms (recommended option first). No framework decision is taken here:
+  stage 2 starts by proposing the web stack to the person (a library versus
+  plain server-rendered HTML), per the person's rule.
+- The browser gets the API token through a one-time link `taskmoor serve`
+  prints (or `taskmoor web` opens), then a cookie bound to `localhost`.
+- The TUI shows the conveyor's columns when the service runs (A21) and the
+  phase-0 board when it does not.
+
+### Stage 3 — Codex and OpenCode, profiles and routing
+
+- ACP client over stdio; the Codex runner through codex-acp with ChatGPT
+  auth and `default_mode_request_user_input` (A26, fallback to Plan mode);
+  the OpenCode runner through `opencode acp` with form elicitation and the
+  permissions of A28; approvals through `session/request_permission`.
+- Profiles and routing: task `profile`/`model` → `[routing]` → default
+  (C10), `harness` as a preference (A16, including `validate`'s warning),
+  the choice shown and changeable at Run, **Restart with a profile** (A24).
+- **Keep N busy** (priority then id, re-derived after every claim, never
+  `needs_person`, A4).
+
+### Stage 4 — the dispatcher
+
+- Levels (a)/(b)/(c) with the hard stops first (C3, A11, A13, A14), the
+  dispatcher profile's short call, citations checked against the files,
+  audit records, overrides delivered as instructions; "answered by the
+  dispatcher" in the feed.
+
+### Stage 5 — review and acceptance
+
+- revust `codex-only` on the branch when a session completes, findings sent
+  back into the same session, `min(reviews.code, 2)` rounds (A5).
+- The acceptance view (diff against the base, the agent's checks, the review
+  result); **Accept** with the trial merge and the real merge of A8 and the
+  `Task: <ID>` trailer; send back / release (A7, A6). Push stays the
+  person's.
+
+### Stage 6 — guards and power
+
+- Billing badges for all three harnesses (C2, A17, A27, A30); profiles that
+  would bill an API key start only when allowed.
+- Usage guard: remaining plan usage per harness, read by taskmoor itself
+  (F11's sources); the threshold that blocks new starts is proposed to the
+  person in this stage.
+- The idle-sleep assertion while any agent runs (A19).
+
+### Stage 7 — Telegram
+
+- The bot (C6, A9, A12, A20): outbound polling, questions with option
+  buttons and a link to the form on `localhost`, only the person's account,
+  deadlines re-notify; dangerous approvals wait for a confirmation on the
+  Mac (A9), whose mechanism (Touch ID / password through macOS) this stage
+  settles.
+
+### What each stage needs from the person
+
+| Stage | Decision or permission |
+| --- | --- |
+| 1 | Agreement to this split; permission for the real-check Claude session. |
+| 2 | The web stack (proposed with options at the start of the stage). |
+| 3 | Permission for real-check Codex sessions; OpenCode runs bill an API key (A27), so its real check needs explicit permission or stays on fixtures. |
+| 4 | The dispatcher profile. |
+| 5 | Nothing new (revust `codex-only` is already the route). |
+| 6 | The usage threshold. |
+| 7 | The bot token and the person's Telegram account id. |
+
 ## Relation to Guild
+
+Since C12 none of this is needed for v1; the table records where the
+later Guild client and Guild's own backlog meet the conveyor.
 
 | Guild | Relation |
 | --- | --- |
@@ -571,7 +724,9 @@ word, and the spec review checks them first. Nothing is left open.
   CLI and the TUI stay readers; `taskmoor serve`, being the launcher, keeps
   the harness record current for the sessions it runs. `plan.md`'s "Harness
   status" section now says so in one sentence.
-- **A2 — how Guild attaches to a background session.** v1: "Open the
+- **A2 — how Guild attaches to a background session.** *Superseded for v1
+  by C12: see "Without Guild" under [v1 in stages](#v1-in-stages-without-guild);
+  the text below is kept for the later Guild client.* v1: "Open the
   worktree in Guild" and "Continue in terminal". Continue hands the session
   over: the service stops its runner, marks the session "continued in
   terminal", and status then comes from the plan's Guild source (OSC 7501,
