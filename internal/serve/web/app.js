@@ -1,0 +1,633 @@
+// taskmoor board: a client of taskmoor serve's API (snapshot + a stream of
+// events). Every text from tasks and agents goes into the page through
+// textContent, never as HTML.
+//
+// Sign-in: the one-time code arrives in the URL fragment (never sent to a
+// server); the page trades it for a browser token and keeps that in
+// localStorage, which belongs to this origin (host and port) alone. Every
+// request carries it in the Authorization header: there is no cookie.
+"use strict";
+
+const COLUMNS = [
+  ["backlog", "Backlog"], ["ready", "Ready"], ["running", "Running"],
+  ["needs", "Needs you"], ["review", "Review"], ["merged", "Merged"], ["done", "Done"],
+];
+const ENDED = new Set(["complete", "error", "stopped", "stale", "handedOver"]);
+
+const S = {
+  snap: null,
+  project: localGet("project"),
+  selected: null,       // {project, task} whose panel is open
+  inbox: false,         // the inbox panel is open
+  body: null,           // {project, task, text} of the open card
+  feed: null,           // {project, task, session, bySeq: Map}
+  feedError: {},        // session id → time of the last failed load
+  drafts: {},           // what the person typed or picked, by control key
+  connected: false,
+  gen: 0,               // the event stream's generation
+  refreshing: false,
+  refreshAgain: false,
+  reloadFeed: false,
+};
+
+function localGet(k) { try { return localStorage.getItem("taskmoor." + k); } catch { return null; } }
+function localSet(k, v) { try { if (v === null) localStorage.removeItem("taskmoor." + k); else localStorage.setItem("taskmoor." + k, v); } catch { /* private window */ } }
+
+// h builds an element: h("div", {class: "x", onclick: f}, child, "text", …)
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "class") el.className = v;
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat(Infinity)) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+
+// nodes flattens a list of children and drops the empty ones.
+function nodes(list) { return list.flat(Infinity).filter(k => k !== null && k !== undefined && k !== false); }
+
+// ---- sign-in and requests ----
+
+// signIn redeems a code from the fragment, at load and when a link is
+// pasted into this tab (hashchange); one redemption per code.
+async function signIn() {
+  const m = /^#code=([0-9a-f]+)$/.exec(location.hash);
+  if (!m || S.signingIn === m[1]) return;
+  S.signingIn = m[1];
+  history.replaceState(null, "", location.pathname); // the code leaves the address bar
+  try {
+    const resp = await fetch("/api/sign-in", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: m[1] }) });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.token) { localSet("token", data.token); showBoard(); return; }
+    signinMessage("Sign-in failed: " + (data.error || resp.statusText));
+  } catch (e) {
+    signinMessage("Sign-in failed: taskmoor serve did not answer (" + e.message + ").");
+  } finally {
+    S.signingIn = null;
+  }
+}
+
+function signinMessage(text) {
+  showSignin();
+  document.getElementById("signin-msg").textContent = text;
+}
+
+class Unauthorized extends Error {}
+
+async function api(method, path, body) {
+  const token = localGet("token");
+  if (!token) { showSignin(); throw new Unauthorized("not signed in"); }
+  const opts = { method, headers: { "Authorization": "Bearer " + token } };
+  if (method !== "GET") {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body || {});
+  }
+  const resp = await fetch(path, opts);
+  let data = null;
+  try { data = await resp.json(); } catch { /* empty */ }
+  if (resp.status === 401) { localSet("token", null); showSignin(); throw new Unauthorized("not signed in"); }
+  if (!resp.ok) throw new Error((data && data.error) || resp.statusText);
+  return data;
+}
+
+function showSignin() {
+  S.gen++; if (S.abort) { S.abort.abort(); S.abort = null; } // no stream without a sign-in
+  S.connected = false;
+  document.getElementById("signin").hidden = false;
+  document.getElementById("board").hidden = true;
+  document.querySelector(".top").hidden = true;
+  document.getElementById("panel").hidden = true;
+}
+
+function showBoard() {
+  document.getElementById("signin").hidden = true;
+  document.getElementById("signin-msg").textContent = "";
+  document.getElementById("board").hidden = false;
+  document.querySelector(".top").hidden = false;
+}
+
+// ---- data ----
+
+function currentProject() {
+  const ps = (S.snap && S.snap.projects) || [];
+  return ps.find(p => p.name === S.project) || ps[0] || null;
+}
+
+// latestSessions maps a task id to its newest session in the project.
+function latestSessions(project) {
+  const p = S.snap.projects.find(x => x.name === project);
+  const m = new Map();
+  for (const s of S.snap.sessions) {
+    // a session of the same name's earlier repository is not this project's
+    if (s.project !== project || (s.project_path && p && s.project_path !== p.path)) continue;
+    const cur = m.get(s.task);
+    if (!cur || s.started_at > cur.started_at || s.started_at === cur.started_at && s.id > cur.id) m.set(s.task, s);
+  }
+  return m;
+}
+
+function column(t, sess) {
+  switch (t.lifecycle) {
+    case "backlog": return t.ready ? "ready" : "backlog";
+    case "in_progress": return sess && sess.state === "awaitingInput" ? "needs" : "running";
+    case "review": return "review";
+    case "merged": return "merged";
+    case "done": return "done";
+  }
+  return null; // cancelled: not on the board
+}
+
+// refresh reads a snapshot. Requests never overlap: an update that comes
+// during one asks for another after it. A snapshot older than the one
+// shown (same service run, lower revision) is dropped.
+async function refresh() {
+  if (S.refreshing) { S.refreshAgain = true; return; }
+  S.refreshing = true;
+  try {
+    const snap = await api("GET", "/api/snapshot");
+    const old = S.snap;
+    if (!(old && old.epoch === snap.epoch && snap.rev < old.rev)) S.snap = snap;
+  } catch (e) {
+    S.refreshing = false;
+    if (e instanceof Unauthorized) return;
+    // the service is unreachable or failing: the last view stays, marked
+    // Disconnected (never Ended), and the page keeps trying
+    disconnected("Disconnected from taskmoor serve (" + e.message + ") — what you see may be out of date. Retrying…");
+    return;
+  }
+  S.refreshing = false;
+  banner(null);
+  render();
+  if (S.reloadFeed) { S.reloadFeed = false; reloadOpenFeed(); }
+  connect();
+  if (S.refreshAgain) { S.refreshAgain = false; refresh(); }
+}
+
+// scheduleRefresh refreshes at most 250 ms after the first of a burst of
+// events: a busy stream cannot postpone it forever
+function scheduleRefresh() {
+  if (S.refreshTimer) return;
+  S.refreshTimer = setTimeout(() => { S.refreshTimer = null; refresh(); }, 250);
+}
+
+function disconnected(text) {
+  S.connected = false; conn(); banner(text);
+  S.gen++; // the current stream, if any, is abandoned
+  if (S.abort) { S.abort.abort(); S.abort = null; }
+  S.reloadFeed = true; // events may be missed while away
+  clearTimeout(S.retryTimer);
+  S.retryTimer = setTimeout(refresh, 3000);
+}
+
+// connect follows the event stream from the snapshot's position, read with
+// fetch so the token goes in a header. A lost stream shows Disconnected —
+// never Ended — and reconnects. A stream of an older generation is ignored.
+function connect() {
+  if (S.abort && S.streamEpoch === S.snap.epoch) return;
+  if (S.abort) S.abort.abort();
+  const gen = ++S.gen;
+  const ctl = new AbortController();
+  S.abort = ctl; S.streamEpoch = S.snap.epoch;
+  const token = localGet("token");
+  (async () => {
+    let resp;
+    try {
+      resp = await fetch(`/api/events?epoch=${encodeURIComponent(S.snap.epoch)}&rev=${S.snap.rev}`,
+        { headers: { "Authorization": "Bearer " + token }, signal: ctl.signal });
+    } catch { if (gen === S.gen) lost(); return; }
+    if (resp.status === 401) { localSet("token", null); showSignin(); return; }
+    if (!resp.ok || !resp.body) { if (gen === S.gen) lost(); return; }
+    if (gen !== S.gen) return;
+    S.connected = true; conn(); banner(null);
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (gen !== S.gen) return;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf("\n\n")) >= 0) {
+          const block = buf.slice(0, i); buf = buf.slice(i + 2);
+          for (const line of block.split("\n")) if (line.startsWith("data: ")) onEvent(line.slice(6));
+          if (gen !== S.gen) return;
+        }
+      }
+    } catch { /* aborted or broken */ }
+    if (gen === S.gen) lost();
+  })();
+}
+
+function lost() {
+  S.abort = null;
+  disconnected("Disconnected from taskmoor serve — what you see may be out of date. Reconnecting…");
+}
+
+function onEvent(data) {
+  let ev;
+  try { ev = JSON.parse(data); } catch { return; }
+  if (ev.type === "reset") {
+    // missed events: read everything again; the stream itself goes on
+    S.reloadFeed = true;
+    refresh();
+    return;
+  }
+  if (ev.type === "activity" && S.feed && ev.data.session === S.feed.session) {
+    addActivity(ev.data.activity);
+    renderFeed();
+    return;
+  }
+  scheduleRefresh();
+}
+
+// a stream that died without telling is retried
+setInterval(() => { if (!S.connected && localGet("token")) refresh(); }, 5000);
+
+function conn() {
+  const el = document.getElementById("conn");
+  el.className = "conn" + (S.connected ? "" : " off");
+  el.title = S.connected ? "Connected to taskmoor serve" : "Disconnected";
+}
+
+function banner(text) {
+  const el = document.getElementById("banner");
+  el.hidden = !text;
+  el.textContent = text || "";
+}
+
+// ---- drafts: what the person typed survives a redraw ----
+
+function draft(el, key) {
+  el.dataset.draft = key;
+  if (key in S.drafts) {
+    if (el.type === "checkbox" || el.type === "radio") el.checked = S.drafts[key];
+    else el.value = S.drafts[key];
+  }
+  const save = () => {
+    if (el.type === "radio") {
+      document.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`).forEach(r => { S.drafts[r.dataset.draft] = r.checked; });
+    } else S.drafts[key] = (el.type === "checkbox") ? el.checked : el.value;
+  };
+  el.addEventListener("input", save);
+  el.addEventListener("change", save);
+  return el;
+}
+
+function forget(prefix) { for (const k of Object.keys(S.drafts)) if (k.startsWith(prefix)) delete S.drafts[k]; }
+
+// keepFocus redraws while keeping the focused control and its caret.
+function keepFocus(redraw) {
+  const a = document.activeElement;
+  const key = a && a.dataset && a.dataset.draft;
+  const sel = key && "selectionStart" in a ? [a.selectionStart, a.selectionEnd] : null;
+  redraw();
+  if (!key) return;
+  const el = document.querySelector(`[data-draft="${CSS.escape(key)}"]`);
+  if (!el) return;
+  el.focus();
+  if (sel) { try { el.setSelectionRange(sel[0], sel[1]); } catch { /* not a text control */ } }
+}
+
+// ---- rendering ----
+
+function render() {
+  keepFocus(() => {
+    const sel = document.getElementById("project");
+    sel.replaceChildren(...S.snap.projects.map(p => h("option", { value: p.name, selected: p === currentProject() }, p.name)));
+    const count = S.snap.asks.length;
+    document.getElementById("inbox-count").textContent = count;
+    document.getElementById("inbox-btn").className = "inbox-btn" + (count ? " has" : "");
+    renderBoard();
+    renderPanel();
+  });
+}
+
+function renderBoard() {
+  const p = currentProject();
+  const board = document.getElementById("board");
+  if (!p) {
+    board.replaceChildren(h("p", { class: "empty" }, "No project is registered. Run `taskmoor project add PATH`."));
+    return;
+  }
+  document.getElementById("facts").textContent = p.path + (p.error ? " — " + p.error : "");
+  const sessions = latestSessions(p.name);
+  const cols = new Map(COLUMNS.map(([k]) => [k, []]));
+  for (const t of p.tasks) {
+    const c = column(t, sessions.get(t.id));
+    if (c) cols.get(c).push(t);
+  }
+  board.replaceChildren(...COLUMNS.map(([k, name]) => {
+    const tasks = cols.get(k).sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
+    return h("section", { class: "col" + (k === "needs" ? " needs" : "") },
+      h("h2", {}, name + " ", h("span", {}, tasks.length)),
+      tasks.length ? tasks.map(t => card(p.name, t, sessions.get(t.id), k)) : h("div", { class: "empty" }, "—"));
+  }));
+}
+
+function isSelected(project, task) { return S.selected && S.selected.project === project && S.selected.task === task; }
+
+function card(project, t, sess, col) {
+  const meta = [];
+  if (t.needs_person) meta.push(h("span", { class: "chip", title: "needs a person" }, "⚑"));
+  if (col === "backlog" && t.reasons.length) meta.push(h("span", {}, t.reasons[0]));
+  if (sess && (col === "running" || col === "needs" || col === "review" || !ENDED.has(sess.state))) {
+    meta.push(h("span", { class: "st-" + sess.state }, "● " + stateWord(sess.state)));
+    if (sess.billing) meta.push(billingChip(sess.billing));
+  } else if (t.harness) {
+    meta.push(h("span", { class: "st-" + t.harness.status }, "● " + t.harness.status));
+  }
+  if (t.state && t.state.stale) meta.push(h("span", { class: "chip" }, "stale"));
+  if (t.release_tag) meta.push(h("span", { class: "chip" }, t.release_tag));
+  return h("article", {
+    class: "card" + (col === "needs" ? " needs" : "") + (isSelected(project, t.id) ? " sel" : ""),
+    tabindex: "0", "data-task": t.id,
+    onclick: () => openTask(project, t.id),
+    onkeydown: (e) => { if (e.key === "Enter") openTask(project, t.id); },
+  },
+  h("div", { class: "row" }, h("span", { class: "id" }, t.id), h("span", { class: "chip" }, "P" + t.priority)),
+  h("div", { class: "title" }, t.title),
+  h("div", { class: "meta" }, meta));
+}
+
+function stateWord(s) {
+  return { awaitingInput: "waiting for you", active: "working", handedOver: "in your terminal" }[s] || s;
+}
+
+function billingChip(b) {
+  return b === "api" ? h("span", { class: "chip api", title: "bills an API key" }, "API key")
+    : h("span", { class: "chip sub", title: "your subscription" }, "subscription");
+}
+
+async function openTask(project, id) {
+  const fresh = !isSelected(project, id);
+  const gen = S.bodyGen = (S.bodyGen || 0) + 1; // a later open wins over an earlier response
+  S.project = project; localSet("project", project);
+  S.selected = { project, task: id }; S.inbox = false;
+  if (fresh) { S.feed = null; S.body = null; }
+  render();
+  if (fresh) document.getElementById("panel").scrollTop = 0;
+  try {
+    const t = await api("GET", `/api/projects/${encodeURIComponent(project)}/tasks/${encodeURIComponent(id)}`);
+    if (gen === S.bodyGen && isSelected(project, id)) { S.body = { project, task: id, text: t.body }; render(); }
+  } catch { /* the card still shows the rest */ }
+}
+
+// loadFeed reads a session's history and merges it with what the stream
+// brought meanwhile (by activity number). A response for a card that is
+// no longer open is dropped.
+async function loadFeed(project, task, sessionID) {
+  if (S.loadingFeed === sessionID) { S.feedAgain = true; return; } // after the one in flight
+  S.loadingFeed = sessionID;
+  if (!S.feed || S.feed.session !== sessionID) S.feed = { project, task, session: sessionID, bySeq: new Map() };
+  try {
+    const f = await api("GET", `/api/sessions/${encodeURIComponent(sessionID)}/feed`);
+    if (S.feed && S.feed.session === sessionID && isSelected(project, task)) {
+      for (const a of f.activities) addActivity(a);
+      delete S.feedError[sessionID];
+    }
+  } catch (e) {
+    S.feedError[sessionID] = Date.now(); // retried after a pause, not at once
+    if (S.feed && S.feed.session === sessionID && !S.feed.bySeq.size) S.feed = null;
+    else S.feedAgain = true; // a populated feed still needs the missed part
+    setTimeout(() => { if (isSelected(project, task)) render(); }, 5000);
+  }
+  S.loadingFeed = null;
+  if (S.feedAgain && isSelected(project, task) && !S.feedError[sessionID]) {
+    S.feedAgain = false;
+    loadFeed(project, task, sessionID);
+    return;
+  }
+  if (isSelected(project, task)) render();
+}
+
+function reloadOpenFeed() {
+  if (S.feed && isSelected(S.feed.project, S.feed.task)) loadFeed(S.feed.project, S.feed.task, S.feed.session);
+}
+
+function addActivity(a) {
+  if (!S.feed || !a.seq) return;
+  S.feed.bySeq.set(a.seq, a);
+}
+
+function renderPanel() {
+  const panel = document.getElementById("panel");
+  const body = document.getElementById("panel-body");
+  const show = (on) => { panel.hidden = !on; document.body.classList.toggle("has-panel", on); };
+  if (S.inbox) { show(true); body.replaceChildren(...nodes(inboxView())); return; }
+  const p = S.selected && S.snap.projects.find(x => x.name === S.selected.project);
+  const t = p && p.tasks.find(x => x.id === S.selected.task);
+  if (!t) { show(false); return; }
+  show(true);
+  const sess = latestSessions(p.name).get(t.id);
+  if (sess && S.feed && S.feed.session !== sess.id) S.feed = null;
+  const recentError = sess && S.feedError[sess.id] && Date.now() - S.feedError[sess.id] < 5000;
+  if (sess && !recentError && (!S.feed || S.feedAgain)) { // a session started elsewhere, too
+    if (S.feedError[sess.id]) delete S.feedError[sess.id];
+    S.feedAgain = false;
+    loadFeed(p.name, t.id, sess.id);
+  }
+  body.replaceChildren(...nodes(taskView(p, t, sess)));
+  renderFeed();
+}
+
+function taskView(p, t, sess) {
+  const out = [h("h1", {}, t.id + "  " + t.title)];
+  const facts = [["lifecycle", t.lifecycle], ["priority", "P" + t.priority], ["kind", t.kind], ["component", t.component]];
+  if (t.depends_on.length) facts.push(["depends on", t.depends_on.join(", ")]);
+  facts.push(["touches", t.touches.join(", ")]);
+  if (t.merge_commit) facts.push(["merge", t.merge_commit.slice(0, 10)]);
+  if (t.state) facts.push(["branch", t.state.branch], ["worktree", t.state.worktree]);
+  out.push(h("dl", { class: "facts-list" }, facts.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])));
+  if (t.lifecycle === "backlog" && !t.ready) {
+    out.push(h("h3", {}, "Not ready"), h("ul", { class: "reasons" }, t.reasons.map(r => h("li", {}, r))));
+  }
+  if (t.lifecycle === "backlog" && t.ready) out.push(runForm(p, t));
+  if (sess) out.push(sessionView(sess));
+  if (S.body && S.body.project === p.name && S.body.task === t.id) out.push(h("h3", {}, "Task"), h("div", { class: "body" }, S.body.text));
+  return out;
+}
+
+function runForm(p, t) {
+  const route = p.routes[t.id] || {};
+  const key = `run:${p.name}/${t.id}`;
+  // an invalid route preselects nothing: the person picks a profile
+  const select = draft(h("select", { "aria-label": "Profile" },
+    h("option", { value: "", selected: !route.profile, disabled: true }, "Choose a profile…"),
+    S.snap.profiles.map(pr => h("option", { value: pr.name, selected: pr.name === route.profile, disabled: !pr.runnable },
+      pr.name + " (" + pr.harness + (pr.model ? ", " + pr.model : "") + (pr.api_billing ? ", API key" : "") + ")" + (pr.runnable ? "" : " — later stage")))), key + ":profile");
+  const person = t.needs_person ? draft(h("input", { type: "checkbox" }), key + ":person") : null;
+  const err = h("div", { class: "err" });
+  const run = h("button", { class: "primary", type: "button", disabled: !select.value, onclick: async () => {
+    run.disabled = true; err.textContent = "";
+    try {
+      // the routed profile is the server's to choose (its current config);
+      // a profile is sent only when the person picked one
+      const picked = (key + ":profile") in S.drafts || !route.profile;
+      const s = await api("POST", "/api/run", { project: p.name, task: t.id, profile: picked ? select.value : "", person: !!(person && person.checked) });
+      forget(key);
+      await refresh();
+      loadFeed(p.name, t.id, s.id);
+    } catch (e) { err.textContent = e.message; run.disabled = false; }
+  } }, "Run");
+  select.addEventListener("change", () => { run.disabled = !select.value; });
+  return [h("h3", {}, "Run"),
+    route.error ? h("div", { class: "err" }, route.error) : null,
+    h("div", { class: "actions" }, select, run,
+      person ? h("label", {}, person, " a person starts or permits this run (⚑)") : null),
+    err];
+}
+
+function sessionView(sess) {
+  const err = h("div", { class: "err" });
+  const act = (label, fn, cls) => h("button", { type: "button", class: cls, onclick: async (e) => {
+    e.target.disabled = true; err.textContent = "";
+    try { await fn(); } catch (x) { err.textContent = x.message; }
+    e.target.disabled = false;
+  } }, label);
+  const sid = encodeURIComponent(sess.id);
+  const running = !ENDED.has(sess.state);
+  const mine = sess.state !== "handedOver"; // handed over: the person's now
+  const sayKey = "say:" + sess.id;
+  const say = draft(h("textarea", { placeholder: running ? "An instruction for the agent…" : "An instruction resumes the conversation…" }), sayKey);
+  return [h("h3", {}, "Session"),
+    h("dl", { class: "facts-list" },
+      h("dt", {}, "state"), h("dd", { class: "st-" + sess.state }, stateWord(sess.state) + (sess.error ? " — " + sess.error : "")),
+      h("dt", {}, "profile"), h("dd", {}, sess.profile + (sess.model ? " · " + sess.model : "")),
+      h("dt", {}, "billing"), h("dd", {}, sess.billing ? billingChip(sess.billing) : "—"),
+      h("dt", {}, "worktree"), h("dd", { class: "mono" }, sess.worktree),
+      h("dt", {}, "resume"), h("dd", { class: "mono" }, sess.resume)),
+    h("div", { class: "actions" },
+      act("Copy cd", () => copy("cd " + shellQuote(sess.worktree))),
+      act("Open in Finder", () => api("POST", `/api/sessions/${sid}/open`, { with: "finder" })),
+      act("Open in editor", () => api("POST", `/api/sessions/${sid}/open`, { with: "editor" })),
+      mine ? act("Continue in terminal", async () => {
+        if (!confirmStep("Stop the agent and continue this conversation in your terminal?")) return;
+        const r = await api("POST", `/api/sessions/${sid}/handover`, {});
+        await copy(r.resume); banner("Copied: " + r.resume + " — then `taskmoor review " + sess.task + "` when done.");
+      }) : null,
+      running ? act("Stop", () => api("POST", `/api/sessions/${sid}/stop`, {}), "danger") : null,
+      mine ? act("Release", async () => {
+        if (!confirmStep("Release " + sess.task + "? The session stops and the claim goes; the worktree and branch stay.")) return;
+        await api("POST", `/api/sessions/${sid}/release`, {});
+      }, "danger") : null),
+    mine ? h("div", {}, say, h("div", { class: "actions" }, act("Say", async () => {
+      const sent = say.value;
+      if (!sent.trim()) return;
+      await api("POST", `/api/sessions/${sid}/say`, { text: sent });
+      // clear only what was sent: a newer draft typed meanwhile stays
+      if ((S.drafts[sayKey] ?? sent) === sent) {
+        delete S.drafts[sayKey];
+        const cur = document.querySelector(`[data-draft="${CSS.escape(sayKey)}"]`);
+        if (cur && cur.value === sent) cur.value = "";
+      }
+    }, "primary"))) : h("p", { class: "empty" }, "This session continues in your terminal; finish with `taskmoor review " + sess.task + "`."),
+    err,
+    h("h3", {}, "Feed"),
+    h("ul", { class: "feed", id: "feed", "data-session": sess.id })];
+}
+
+// confirmStep is a plain confirmation the person gives in the page.
+function confirmStep(text) { return window.confirm(text); }
+
+function renderFeed() {
+  const ul = document.getElementById("feed");
+  if (!ul) return;
+  // only the feed of the session this card shows
+  const acts = S.feed && S.feed.session === ul.dataset.session
+    ? [...S.feed.bySeq.values()].sort((a, b) => a.seq - b.seq) : [];
+  const atBottom = ul.scrollHeight - ul.scrollTop - ul.clientHeight < 40;
+  ul.replaceChildren(...acts.map(a => h("li", { class: a.type },
+    h("span", { class: "t" }, clock(a.at)),
+    h("span", { class: "k" }, a.type + (a.tool ? " " + a.tool : "") + (a.by && a.by !== "person" ? " (" + a.by + ")" : "")),
+    h("span", { class: "x" }, a.text || ""))));
+  if (atBottom) ul.scrollTop = ul.scrollHeight; // follow the newest unless the person scrolled up
+}
+
+function clock(at) {
+  const d = new Date(at);
+  return isNaN(d) ? at : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function inboxView() {
+  const asks = S.snap.asks;
+  const out = [h("h1", {}, "Needs you")];
+  if (!asks.length) out.push(h("p", { class: "empty" }, "Nothing waits for you."));
+  for (const a of asks) out.push(askForm(a));
+  return out;
+}
+
+function askForm(a) {
+  const err = h("div", { class: "err" });
+  const head = h("div", { class: "row" }, h("b", {}, a.project + " · " + a.task), " ", h("span", { class: "chip" }, a.kind), " ",
+    h("a", { href: "#", onclick: (e) => { e.preventDefault(); openTask(a.project, a.task); } }, "open the task"));
+  const send = async (body) => {
+    err.textContent = "";
+    try { await api("POST", `/api/asks/${encodeURIComponent(a.id)}/answer`, body); forget("ask:" + a.id); await refresh(); }
+    catch (e) { err.textContent = e.message; }
+  };
+  if (a.kind === "approval") {
+    const note = draft(h("input", { type: "text", placeholder: "Why (optional, sent with a deny)" }), `ask:${a.id}:note`);
+    return h("div", { class: "ask" }, head,
+      h("div", { class: "q" }, a.tool + " — " + a.reason),
+      h("pre", { class: "mono" }, a.detail || ""),
+      h("div", { class: "actions" },
+        h("button", { class: "primary", type: "button", onclick: () => send({ allow: true }) }, "Allow"),
+        h("button", { class: "danger", type: "button", onclick: () => send({ allow: false, text: note.value }) }, "Deny"),
+        note),
+      err);
+  }
+  const groups = a.questions.map((q, qi) => {
+    // the recommended option first (F9)
+    const order = q.options.map((o, i) => i);
+    if (q.recommended >= 0) { order.splice(order.indexOf(q.recommended), 1); order.unshift(q.recommended); }
+    const name = `q-${a.id}-${qi}`;
+    return h("fieldset", { class: "plain" },
+      h("div", { class: "q" }, (q.header ? "[" + q.header + "] " : "") + q.question),
+      order.map(i => {
+        const o = q.options[i];
+        const input = draft(h("input", { type: q.multi_select ? "checkbox" : "radio", name, value: String(i + 1), checked: i === q.recommended && !q.multi_select }), `ask:${a.id}:${qi}:${i}`);
+        return h("div", {},
+          h("label", {}, input, " " + o.label, i === q.recommended ? h("span", { class: "rec" }, "recommended") : null),
+          o.description ? h("div", { class: "desc" }, o.description) : null);
+      }));
+  });
+  const other = draft(h("input", { type: "text", placeholder: "Or answer in your own words (first question)" }), `ask:${a.id}:other`);
+  const form = h("div", { class: "ask" }, head, groups,
+    h("div", { class: "actions" }, other,
+      h("button", { class: "primary", type: "button", onclick: () => {
+        if (other.value.trim()) return send({ text: other.value.trim() });
+        const choices = a.questions.map((q, qi) =>
+          [...form.querySelectorAll(`input[name="q-${a.id}-${qi}"]:checked`)].map(i => i.value));
+        if (choices.some(c => !c.length)) { err.textContent = "Pick an option for every question."; return; }
+        return send({ choices });
+      } }, "Answer")),
+    err);
+  return form;
+}
+
+async function copy(text) {
+  try { await navigator.clipboard.writeText(text); } catch { window.prompt("Copy:", text); }
+}
+
+function shellQuote(p) { return /^[\w./-]+$/.test(p) ? p : "'" + p.replace(/'/g, "'\\''") + "'"; }
+
+// ---- wiring ----
+
+document.getElementById("project").addEventListener("change", (e) => {
+  S.project = e.target.value; localSet("project", S.project);
+  S.selected = null; S.feed = null; S.body = null; render();
+});
+document.getElementById("inbox-btn").addEventListener("click", () => { S.inbox = true; S.selected = null; render(); });
+const closePanel = () => { S.inbox = false; S.selected = null; S.feed = null; S.body = null; render(); };
+document.getElementById("panel-close").addEventListener("click", closePanel);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePanel(); });
+window.addEventListener("hashchange", () => { signIn().then(() => { if (localGet("token")) refresh(); }); });
+signIn().then(() => { if (localGet("token")) refresh(); else showSignin(); });

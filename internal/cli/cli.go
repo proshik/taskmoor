@@ -41,6 +41,8 @@ type Env struct {
 	Harness harness.Source
 	// TUI runs the board; nil means the board is not available.
 	TUI func(ctx context.Context, a *app.App) error
+	// OpenURL opens a link in the browser; nil prints it instead.
+	OpenURL func(url string) error
 }
 
 const usage = `usage:
@@ -64,6 +66,8 @@ The service (taskmoor serve) and its clients:
   taskmoor answer ASK N [N…] | --text T | --allow | --deny [--text WHY]
   taskmoor stop ID                                     stop a session; the claim stays
   taskmoor say ID TEXT…                                an instruction (resumes an ended session)
+  taskmoor continue ID                                 hand the session to your terminal (prints the resume command)
+  taskmoor web [--print]                               open the board in the browser (a one-time sign-in link)
 
 --repo and --source work before or after the subcommand. The board, list,
 show, ready and claim read tasks from the main branch; validate reads the
@@ -128,6 +132,10 @@ func Run(ctx context.Context, args []string, env Env) int {
 		return r.stopCmd(ctx, rest)
 	case "say":
 		return r.sayCmd(ctx, rest)
+	case "web":
+		return r.webCmd(ctx, rest)
+	case "continue":
+		return r.handoverCmd(ctx, rest)
 	case "version":
 		if len(rest) > 0 {
 			return r.usageErr(usagef("version takes no arguments"))

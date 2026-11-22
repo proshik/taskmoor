@@ -54,6 +54,9 @@ type Config struct {
 	DefaultProfile string    `toml:"default_profile"`
 	Projects       []Project `toml:"projects"`
 	Profiles       []Profile `toml:"profiles"`
+	// Editor opens a worktree from the board: the command and its first
+	// arguments, the worktree is added last (e.g. ["code", "-n"]).
+	Editor []string `toml:"editor,omitempty"`
 }
 
 // Project is a registered repository.

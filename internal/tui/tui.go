@@ -44,7 +44,17 @@ var columnNames = map[string]string{
 	derive.Merged:     "Merged",
 	derive.Done:       "Done",
 	derive.Cancelled:  "Cancelled",
+	colReady:          "Ready",
+	colRunning:        "Running",
+	colNeeds:          "Needs you",
 }
+
+// The conveyor's own columns (A21), when the board reads taskmoor serve.
+const (
+	colReady   = "ready"
+	colRunning = "running"
+	colNeeds   = "needs"
+)
 
 // Messages.
 type (
@@ -115,13 +125,16 @@ func New(ctx context.Context, loader Loader, rep *app.Report) Model {
 	return m
 }
 
-// Run loads the project and runs the board until the person quits.
+// Run loads the project and runs the board until the person quits. When
+// taskmoor serve runs and has the project registered, the board is its
+// client and shows the conveyor's columns (A21).
 func Run(ctx context.Context, a *app.App) error {
-	rep, err := a.Report(ctx)
+	loader := &autoLoader{a: a, find: serviceLoaderFor}
+	rep, err := loader.Report(ctx)
 	if err != nil {
 		return err
 	}
-	m := New(ctx, a, rep)
+	m := New(ctx, loader, rep)
 	_, err = tea.NewProgram(m, tea.WithContext(ctx)).Run()
 	if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
 		return nil // stopped by a signal: a normal end
@@ -219,7 +232,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // applyReport takes a new report; the selection follows the task id.
 func (m *Model) applyReport(rep *app.Report) {
 	cur := m.currentID()
+	prevCol := m.currentColumn()
 	m.rep, m.fp = rep, rep.Fingerprint
+	// the set of columns may change (the service came or went): keep the
+	// column by name, or a valid one
+	cols := m.columns()
+	m.col = min(m.col, len(cols)-1)
+	for i, c := range cols {
+		if c == prevCol {
+			m.col = i
+		}
+	}
 	m.fixSelection(cur)
 	if m.detail != nil {
 		if _, ok := rep.Find(m.detail.id); ok {
@@ -354,6 +377,9 @@ func (m Model) boardKey(k string) (tea.Model, tea.Cmd) {
 // columns are the lifecycles shown, in order.
 func (m Model) columns() []string {
 	cols := []string{derive.Backlog, derive.InProgress, derive.Review, derive.Merged, derive.Done}
+	if m.rep != nil && m.rep.Conveyor {
+		cols = []string{derive.Backlog, colReady, colRunning, colNeeds, derive.Review, derive.Merged, derive.Done}
+	}
 	if m.showCancelled {
 		cols = append(cols, derive.Cancelled)
 	}
@@ -369,7 +395,11 @@ func (m Model) items(col string) []app.TaskView {
 	f := strings.ToLower(m.filter)
 	var out []app.TaskView
 	for _, t := range m.rep.Tasks {
-		if t.Lifecycle != col {
+		key := t.Lifecycle
+		if t.Column != "" {
+			key = t.Column
+		}
+		if key != col {
 			continue
 		}
 		if col == derive.Backlog && m.readyOnly && !t.Ready {
@@ -410,6 +440,7 @@ func indexOf(items []app.TaskView, id string) int {
 // column, the board moves with it.
 func (m *Model) fixSelection(follow string) {
 	cols := m.columns()
+	m.col = min(max(m.col, 0), len(cols)-1)
 	if follow != "" {
 		for i, c := range cols {
 			if indexOf(m.items(c), follow) >= 0 {
@@ -538,6 +569,8 @@ func (m Model) title() string {
 		parts = append(parts, "Guild "+lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("●"))
 	case harness.ReportGuildUnavailable:
 		parts = append(parts, "Guild "+dim.Render("○"))
+	case "taskmoor serve":
+		parts = append(parts, "serve "+lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("●"))
 	}
 	left := strings.Join(parts, " · ")
 	var right []string
@@ -580,6 +613,9 @@ func (m Model) renderFooter() string {
 		return dim.Render("↑↓ scroll  pgup/pgdown page  g/G top/bottom  R refresh  esc back  ? help")
 	}
 	keys := "←→ column  ↑↓ task  enter open  / filter  r ready only  c cancelled  ? help  q quit"
+	if m.rep != nil && m.rep.Conveyor {
+		keys = "←→ column  ↑↓ task  enter open  / filter  c cancelled  ? help  q quit  ·  run, answer: taskmoor web"
+	}
 	if m.rep != nil && m.rep.HarnessSource == harness.ReportGuildUnavailable {
 		return dim.Render("Guild: unavailable  ·  " + keys)
 	}

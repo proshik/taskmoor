@@ -29,8 +29,12 @@ type Service struct {
 	Env     []string // the base environment for agents (os.Environ())
 	Home    string   // for Claude's user settings
 
+	// Opener runs the command that shows a worktree (Finder, an editor).
+	Opener func(argv []string) error
+
 	journal *journal
 	bus     *bus
+	auth    *webAuth
 	lock    *os.File // the store's serve.lock, held from Open to Close
 
 	// runners counts runner goroutines until their last callback returns,
@@ -54,10 +58,12 @@ type live struct {
 	s        *Session
 	runner   *claudeRunner
 	starting bool // a launch is under way: no second one
-	rules    Rules
-	app      *app.App
-	profile  Profile
-	stateDir string
+	// handingOver: a handover to the terminal is under way: no launch
+	handingOver bool
+	rules       Rules
+	app         *app.App
+	profile     Profile
+	stateDir    string
 	// pending maps a Claude control request id to the ask waiting on it.
 	pending map[string]string
 	// stopping marks a stop the person asked for.
@@ -150,8 +156,9 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 		lock.Close()
 		return nil, err
 	}
-	s := &Service{Paths: paths, Version: version, Now: time.Now, Env: env, Home: home, lock: lock,
+	s := &Service{Paths: paths, Version: version, Now: time.Now, Env: env, Home: home, lock: lock, Opener: runDetached,
 		journal: j, bus: newBus(), sessions: map[string]*live{}, asks: map[string]*Ask{}, owners: map[string]*os.File{}}
+	s.auth = newWebAuth(func() time.Time { return s.Now() }, filepath.Join(paths.Store, "web-sessions.json"))
 	old, err := j.sessions()
 	if err != nil {
 		lock.Close()
@@ -167,10 +174,20 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 			rec.State = StateStale
 			rec.UpdatedAt = stamp(s.Now())
 			_ = j.saveSession(rec)
-			_ = j.append(rec.ID, Activity{At: rec.UpdatedAt, Type: ActError, Text: "the service restarted; the session's process is gone (say something to resume it)"})
+			_, _ = j.append(rec.ID, Activity{At: rec.UpdatedAt, Type: ActError, Text: "the service restarted; the session's process is gone (say something to resume it)"})
 		}
 		// a session whose claim is still its own is this service's again
-		if s.attach(l) != nil || !s.ownsClaim(l) {
+		if s.attach(l) != nil {
+			continue
+		}
+		if !s.ownsClaim(l) {
+			if rec.HandoverPending { // the claim already let go: only the record is left
+				s.finishHandover(l)
+			}
+			continue
+		}
+		if rec.HandoverPending || rec.State == StateHandedOver {
+			s.finishHandover(l) // a handover a crash interrupted
 			continue
 		}
 		_ = s.holdOwner(l)
@@ -345,7 +362,7 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*Session, error) {
 	}
 	rec := &Session{ID: id, Project: p.Name, Task: t.ID, Title: t.Title, Profile: prof.Name, Harness: prof.Harness,
 		Model: prof.Model, Worktree: wt, Branch: branch, State: StatePending, StartedAt: now, UpdatedAt: now,
-		Resume: fmt.Sprintf("cd %s && claude --resume %s", shellQuote(wt), id)}
+		Resume: fmt.Sprintf("cd %s && claude --resume %s", shellQuote(wt), id), ProjectPath: p.Path}
 	l := &live{s: rec, app: a, profile: *prof, pending: map[string]string{}, stateDir: rep.Snapshot.StateDir,
 		rules: Rules{Worktree: wt, MainBranch: rep.MainBranch, MainCheckout: root}}
 	// the launch is reserved before anything is published, so Release and
@@ -448,6 +465,8 @@ func (s *Service) reserve(l *live) error {
 		return refusedf("taskmoor serve is stopping")
 	case l.runner != nil || l.starting:
 		return refusedf("session %s is already running", l.s.ID)
+	case l.handingOver || l.s.State == StateHandedOver:
+		return refusedf("session %s is handed over to the terminal", l.s.ID)
 	}
 	l.starting = true
 	s.launches.Add(1)
@@ -464,6 +483,22 @@ func (s *Service) unreserve(l *live) {
 // launch starts the runner of a reserved session and sends its first
 // message; the reservation ends either way.
 func (s *Service) launch(l *live, resume bool, first string) error {
+	if resume {
+		// a fresh state for this run, written before it starts, so a stop
+		// before its init, or a restart, is not read as the previous run's
+		// completion
+		l.stmu.Lock()
+		s.mu.Lock()
+		l.s.State = StatePending
+		s.mu.Unlock()
+		err := s.saveAndPublishErr(l)
+		l.stmu.Unlock()
+		if err != nil {
+			s.unreserve(l)
+			return fmt.Errorf("the session record could not be written: %w", err)
+		}
+		s.writeHarness(l, StatePending)
+	}
 	h := &sessionHost{s: s, l: l}
 	s.runners.Add(1)
 	_, err := startClaude(claudeStart{Program: l.profile.Command, Dir: l.s.Worktree, SessionID: l.s.ID, Resume: resume,
@@ -765,9 +800,19 @@ func (s *Service) Feed(id string) ([]Activity, error) {
 type Snapshot struct {
 	Epoch    string         `json:"epoch"`
 	Rev      int64          `json:"rev"`
+	Profiles []ProfileView  `json:"profiles"`
 	Projects []ProjectState `json:"projects"`
 	Sessions []Session      `json:"sessions"`
 	Asks     []Ask          `json:"asks"`
+}
+
+// ProfileView is a profile as clients show it.
+type ProfileView struct {
+	Name       string `json:"name"`
+	Harness    string `json:"harness"`
+	Model      string `json:"model,omitempty"`
+	APIBilling bool   `json:"api_billing,omitempty"`
+	Runnable   bool   `json:"runnable"`
 }
 
 // ProjectState is a registered project with its tasks.
@@ -776,22 +821,46 @@ type ProjectState struct {
 	Path  string         `json:"path"`
 	Error string         `json:"error,omitempty"`
 	Tasks []app.TaskView `json:"tasks"`
+	// Routes is the profile Run would choose per task id (C10), or the
+	// reason there is none.
+	Routes map[string]Route `json:"routes"`
+}
+
+// Route is the routed profile of a task.
+type Route struct {
+	Profile string `json:"profile,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // Snapshot reads every project now and the sessions and asks held.
 func (s *Service) Snapshot(ctx context.Context) (*Snapshot, error) {
+	// the position first: an event during the reads below makes the
+	// client's stream start with a reset, so it reads again
+	epoch, rev := s.bus.position()
 	cfg, err := s.Config()
 	if err != nil {
 		return nil, err
 	}
-	epoch, rev := s.bus.position()
-	out := &Snapshot{Epoch: epoch, Rev: rev, Projects: []ProjectState{}, Sessions: []Session{}, Asks: []Ask{}}
+	out := &Snapshot{Epoch: epoch, Rev: rev, Profiles: []ProfileView{}, Projects: []ProjectState{}, Sessions: []Session{}, Asks: []Ask{}}
+	for _, p := range cfg.Profiles {
+		out.Profiles = append(out.Profiles, ProfileView{Name: p.Name, Harness: p.Harness, Model: p.Model, APIBilling: p.APIBilling, Runnable: runnable[p.Harness]})
+	}
 	for _, p := range cfg.Projects {
-		ps := ProjectState{Name: p.Name, Path: p.Path, Tasks: []app.TaskView{}}
+		ps := ProjectState{Name: p.Name, Path: p.Path, Tasks: []app.TaskView{}, Routes: map[string]Route{}}
 		if rep, err := s.appFor(p).Report(ctx); err != nil {
 			ps.Error = err.Error()
 		} else {
 			ps.Tasks = rep.Tasks
+			for _, t := range rep.Tasks {
+				if t.Lifecycle != derive.Backlog {
+					continue
+				}
+				if prof, err := chooseProfile(cfg, rep.Snapshot.Config, t, ""); err != nil {
+					ps.Routes[t.ID] = Route{Error: err.Error()}
+				} else {
+					ps.Routes[t.ID] = Route{Profile: prof.Name}
+				}
+			}
 		}
 		out.Projects = append(out.Projects, ps)
 	}
@@ -848,7 +917,7 @@ func (s *Service) addActivity(l *live, a Activity) {
 	}
 	sid := l.s.ID
 	s.mu.Unlock()
-	_ = s.journal.append(sid, a)
+	a, _ = s.journal.append(sid, a) // numbers it: Seq orders and identifies it
 	s.bus.publish("activity", map[string]any{"session": sid, "activity": a})
 }
 
@@ -860,13 +929,16 @@ func (s *Service) publishSession(l *live) {
 	s.bus.publish("session", rec)
 }
 
-func (s *Service) saveAndPublish(l *live) {
+func (s *Service) saveAndPublish(l *live) { _ = s.saveAndPublishErr(l) }
+
+func (s *Service) saveAndPublishErr(l *live) error {
 	s.mu.Lock()
 	l.s.UpdatedAt = stamp(s.Now())
 	rec := *l.s
 	s.mu.Unlock()
-	_ = s.journal.saveSession(&rec)
+	err := s.journal.saveSession(&rec)
 	s.bus.publish("session", rec)
+	return err
 }
 
 // setState changes a session's state and the state file's harness record

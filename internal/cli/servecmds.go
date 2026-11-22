@@ -96,6 +96,53 @@ func (r runner) serveCmd(ctx context.Context, args []string) int {
 
 var projectNameRe = regexp.MustCompile(`[^a-z0-9-]+`)
 
+func (r runner) webCmd(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("web", flag.ContinueOnError)
+	printOnly := fs.Bool("print", false, "")
+	pos, err := parse(fs, args)
+	if err == nil && len(pos) > 0 {
+		err = usagef("web takes no arguments")
+	}
+	if err != nil {
+		return r.fail(err, false)
+	}
+	c, err := r.client()
+	if err != nil {
+		return r.fail(err, false)
+	}
+	u, err := c.LoginURL(ctx)
+	if err != nil {
+		return r.serviceFail(err, false)
+	}
+	if *printOnly || r.env.OpenURL == nil {
+		fmt.Fprintln(r.env.Stdout, u)
+		return ExitOK
+	}
+	if err := r.env.OpenURL(u); err != nil {
+		fmt.Fprintf(r.env.Stderr, "taskmoor: could not open the browser (%v); open this one-time link:\n", err)
+		fmt.Fprintln(r.env.Stdout, u)
+		return ExitOK
+	}
+	fmt.Fprintln(r.env.Stdout, "opened the board in the browser (a one-time sign-in link)")
+	return ExitOK
+}
+
+func (r runner) handoverCmd(ctx context.Context, args []string) int {
+	if len(args) != 1 {
+		return r.usageErr(usagef("continue takes one session or task id"))
+	}
+	c, err := r.scopedClient(ctx)
+	if err != nil {
+		return r.fail(err, false)
+	}
+	s, cmd, err := c.Handover(ctx, args[0])
+	if err != nil {
+		return r.serviceFail(err, false)
+	}
+	fmt.Fprintf(r.env.Stdout, "%s is yours now; continue it with:\n  %s\nthen finish with taskmoor review %s\n", s.Task, cmd, s.Task)
+	return ExitOK
+}
+
 func (r runner) projectCmd(ctx context.Context, args []string) int {
 	if len(args) == 0 {
 		return r.usageErr(usagef("project takes add, list or remove"))
@@ -407,7 +454,7 @@ func (r runner) emitEnd(state string, asJSON bool) {
 
 func ended(st string) bool {
 	switch st {
-	case serve.StateComplete, serve.StateError, serve.StateStopped, serve.StateStale:
+	case serve.StateComplete, serve.StateError, serve.StateStopped, serve.StateStale, serve.StateHandedOver:
 		return true
 	}
 	return false
@@ -416,7 +463,8 @@ func ended(st string) bool {
 func activityFrom(v any) serve.Activity {
 	m, _ := v.(map[string]any)
 	str := func(k string) string { s, _ := m[k].(string); return s }
-	return serve.Activity{At: str("at"), Type: str("type"), Text: str("text"), Tool: str("tool"), Ask: str("ask"), By: str("by")}
+	seq, _ := m["seq"].(float64)
+	return serve.Activity{Seq: int(seq), At: str("at"), Type: str("type"), Text: str("text"), Tool: str("tool"), Ask: str("ask"), By: str("by")}
 }
 
 func (r runner) printActivity(a serve.Activity) {

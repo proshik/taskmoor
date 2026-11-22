@@ -85,6 +85,12 @@ func main() {
 	if src == "" {
 		src = "none"
 	}
+	resumedHold := strings.Contains(strings.Join(os.Args, " "), "--resume") && os.Getenv("FAKE_RESUME_HOLD") != ""
+	if resumedHold { // a resumed run that never gets to init
+		for next() != nil {
+		}
+		return
+	}
 	mode := os.Getenv("FAKE_MODE")
 	if mode == "" {
 		mode = "default"

@@ -2,7 +2,6 @@ package serve
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,18 +69,26 @@ func Serve(ctx context.Context, s *Service, logf func(string, ...any)) error {
 	defer os.Remove(filepath.Join(s.Paths.Store, infoName))
 	srv := &http.Server{Handler: s.Handler(token, port), ReadHeaderTimeout: 10 * time.Second}
 	logf("taskmoor serve %s: http://127.0.0.1:%d, store %s, config %s", s.Version, port, s.Paths.Store, s.Paths.Config)
+	logf("open the board: %s (one-time link; `taskmoor web` makes a new one)", s.LoginURL(port))
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
+	wctx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
+	go s.watch(wctx)
 	select {
 	case <-ctx.Done():
 	case err := <-errc:
 		return err
 	}
 	logf("stopping: ending the running sessions (their claims stay)")
-	s.Shutdown() // refuses new launches first, then stops and waits
+	s.Shutdown()     // refuses new launches first, then stops and waits
+	s.bus.closeAll() // event streams end, so open browsers do not hold the server
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return srv.Shutdown(sctx)
+	if err := srv.Shutdown(sctx); err != nil {
+		_ = srv.Close() // a connection that would not finish: cut it
+	}
+	return nil
 }
 
 func ensureToken(store string) (string, error) {
@@ -114,25 +121,59 @@ func (s *Service) Handler(token string, port int) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/snapshot", s.hSnapshot)
 	mux.HandleFunc("GET /api/events", s.hEvents)
+	mux.HandleFunc("GET /api/position", func(w http.ResponseWriter, r *http.Request) {
+		epoch, rev := s.bus.position()
+		writeJSON(w, http.StatusOK, map[string]any{"epoch": epoch, "rev": rev})
+	})
 	mux.HandleFunc("GET /api/sessions/{id}/feed", s.hFeed)
 	mux.HandleFunc("POST /api/run", s.hRun)
 	mux.HandleFunc("POST /api/sessions/{id}/stop", s.hStop)
 	mux.HandleFunc("POST /api/sessions/{id}/say", s.hSay)
 	mux.HandleFunc("POST /api/sessions/{id}/release", s.hRelease)
 	mux.HandleFunc("POST /api/asks/{id}/answer", s.hAnswer)
+	mux.HandleFunc("POST /api/sessions/{id}/open", s.hOpen)
+	mux.HandleFunc("POST /api/sessions/{id}/handover", s.hHandover)
+	mux.HandleFunc("POST /api/login-code", func(w http.ResponseWriter, r *http.Request) {
+		// a sign-in link is for whoever holds the API token (the CLI), not
+		// for a board that is already signed in
+		if kind, _ := s.authorize(r, token); kind != credAPI {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "a sign-in link needs the API token"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"url": s.LoginURL(port)})
+	})
+	mux.HandleFunc("GET /api/projects/{project}/tasks/{id}", s.hTask)
 	hosts := map[string]bool{
 		fmt.Sprintf("127.0.0.1:%d", port): true,
 		fmt.Sprintf("localhost:%d", port): true,
 	}
+	static := staticFiles()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !hosts[r.Host] {
 			http.Error(w, "forbidden host", http.StatusForbidden)
 			return
 		}
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		switch {
+		case r.URL.Path == "/api/sign-in" && r.Method == http.MethodPost:
+			s.hSignIn(w, r)
 			return
+		case !strings.HasPrefix(r.URL.Path, "/api/"):
+			// the page itself holds nothing secret; its API calls need a token
+			w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
+			w.Header().Set("Cache-Control", "no-store")
+			static.ServeHTTP(w, r)
+			return
+		}
+		kind, exp := s.authorize(r, token)
+		if kind == credNone {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized: run `taskmoor web` to sign this browser in"})
+			return
+		}
+		if !exp.IsZero() { // a long-lived stream ends when the token does
+			r = r.WithContext(context.WithValue(r.Context(), expiryKey{}, exp))
 		}
 		mux.ServeHTTP(w, r)
 	})
@@ -284,6 +325,7 @@ func (s *Service) hEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
+	fl.Flush() // the client sees the stream open now, not at the first event
 	send := func(ev Event) bool {
 		data, err := json.Marshal(ev)
 		if err != nil {
@@ -308,8 +350,16 @@ func (s *Service) hEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	tick := time.NewTicker(25 * time.Second)
 	defer tick.Stop()
+	var expired <-chan time.Time
+	if exp, ok := r.Context().Value(expiryKey{}).(time.Time); ok {
+		t := time.NewTimer(time.Until(exp))
+		defer t.Stop()
+		expired = t.C
+	}
 	for {
 		select {
+		case <-expired:
+			return
 		case <-r.Context().Done():
 			return
 		case ev, ok := <-ch:

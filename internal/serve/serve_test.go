@@ -56,6 +56,8 @@ type rig struct {
 	log    string
 	cancel context.CancelFunc
 	done   chan error
+	// configure adjusts a service before it serves (test doubles)
+	configure func(*serve.Service)
 }
 
 func freePort(t *testing.T) int {
@@ -89,6 +91,9 @@ func (rg *rig) open(env []string) {
 	svc, err := serve.Open(rg.paths, "test", append(os.Environ(), env...), rg.home)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if rg.configure != nil {
+		rg.configure(svc)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	rg.svc, rg.cancel, rg.done = svc, cancel, make(chan error, 1)
@@ -752,6 +757,7 @@ func TestRecoveryFinishesAnInterruptedHandover(t *testing.T) {
 	_ = json.Unmarshal(data, &m)
 	m["lifecycle"] = "in_progress"
 	m["harness"].(map[string]any)["status"] = "working"
+	delete(m["harness"].(map[string]any), "exit_code")
 	data, _ = json.Marshal(m)
 	if err := os.WriteFile(sf, data, 0o644); err != nil {
 		t.Fatal(err)

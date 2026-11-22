@@ -93,7 +93,7 @@ signed in with the subscription (`claude`, then `/login`); a profile whose
 program is missing is refused before anything is created.
 
 ```sh
-taskmoor serve &                        # 127.0.0.1:7733, foreground; ctrl+c stops it
+taskmoor serve                          # in its own terminal tab: 127.0.0.1:7733; ctrl+c stops it
 taskmoor project add ~/work/some-project
 cd ~/work/some-project
 taskmoor ready
@@ -106,6 +106,21 @@ taskmoor stop PRJ-007                   # the claim, worktree and branch stay
 taskmoor release PRJ-007                # through the service: stops the session, removes the state file
 ```
 
+- **The web board (stage 2).** `taskmoor serve` prints a one-time sign-in
+  link; `taskmoor web` opens a new one in the browser. Keep the link's
+  `127.0.0.1` address (`localhost` is another origin with no sign-in).
+  After installing a new taskmoor, restart a running `taskmoor serve`
+  (ctrl+c in its tab, then start it again): the old process serves the
+  old API. A service started in the background of a shell (`&`) is
+  stopped with `fg` then ctrl+c, or `kill %1`. The board has the
+  conveyor's columns (Backlog, Ready, Running, Needs you, Review, Merged,
+  Done), a project switcher, a task card with Run (the routed profile
+  preselected), the live feed, Say, Stop, Release, Open in Finder / the
+  configured editor (`editor = ["code", "-n"]`), and Continue in terminal
+  (`taskmoor continue ID` does the same from the CLI), and the inbox with
+  forms. It follows the service's events and shows "Disconnected" while the
+  service is unreachable. The TUI shows the same columns when the service
+  runs and has the project registered.
 - **Config** `~/.config/taskmoor/config.toml` (projects, profiles with
   `harness`, `model`, `api_billing`, `default_profile`, `port`); **store**
   `~/.local/state/taskmoor/` (session journals, the API token). XDG

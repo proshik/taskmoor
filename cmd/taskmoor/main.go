@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime/debug"
 	"syscall"
@@ -35,6 +36,7 @@ func main() {
 		Now:     time.Now,
 		Version: buildVersion(),
 		TUI:     tui.Run,
+		OpenURL: func(u string) error { return exec.Command("open", u).Run() },
 	}))
 }
 

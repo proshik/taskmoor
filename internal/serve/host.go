@@ -154,11 +154,13 @@ func (h *sessionHost) exited(code int, err error) {
 		}
 	}
 	switch {
+	case st == StateComplete || st == StateError:
+		// the turn had already ended (a stop or shutdown that arrives while
+		// the process exits does not undo that)
+		h.s.setState(h.l, st, "")
 	case stopping:
 		h.s.addActivity(h.l, Activity{Type: ActResponse, Text: "stopped by the person", By: "person"})
 		h.s.setState(h.l, StateStopped, "")
-	case st == StateComplete || st == StateError:
-		h.s.setState(h.l, st, "") // refresh exit code
 	default:
 		msg := fmt.Sprintf("the claude process ended (exit %d) before the turn finished", code)
 		if err != nil {
@@ -272,6 +274,17 @@ func (b *bus) publish(typ string, data any) {
 			delete(b.subs, ch)
 			close(ch)
 		}
+	}
+}
+
+// closeAll ends every subscription (the service is stopping): streams
+// send their clients a reset and end.
+func (b *bus) closeAll() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for ch := range b.subs {
+		delete(b.subs, ch)
+		close(ch)
 	}
 }
 

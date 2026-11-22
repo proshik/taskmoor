@@ -21,7 +21,8 @@ const (
 	StateComplete      = "complete"
 	StateError         = "error"
 	StateStale         = "stale"
-	StateStopped       = "stopped" // stopped by the person; the claim is kept (A7)
+	StateStopped       = "stopped"    // stopped by the person; the claim is kept (A7)
+	StateHandedOver    = "handedOver" // continued in the person's terminal; the service let go
 )
 
 // Activity types.
@@ -56,6 +57,12 @@ type Session struct {
 	Error    string  `json:"error,omitempty"`
 	// Resume is the command that continues the conversation in a terminal.
 	Resume string `json:"resume"`
+	// ProjectPath is the registered repository the session belongs to: a
+	// project name reused for another repository does not inherit it.
+	ProjectPath string `json:"project_path,omitempty"`
+	// HandoverPending: a handover to the terminal started and has not
+	// finished letting go of the claim (Open finishes it).
+	HandoverPending bool `json:"handover_pending,omitempty"`
 }
 
 // Activity is one entry of a session's feed.
@@ -74,6 +81,7 @@ type Activity struct {
 type journal struct {
 	dir string
 	mu  sync.Mutex
+	seq map[string]int // session → the last activity number written
 }
 
 func newJournal(store string) (*journal, error) {
@@ -81,7 +89,7 @@ func newJournal(store string) (*journal, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return &journal{dir: dir}, nil
+	return &journal{dir: dir, seq: map[string]int{}}, nil
 }
 
 func (j *journal) saveSession(s *Session) error {
@@ -109,23 +117,58 @@ func (j *journal) remove(id string) error {
 	return nil
 }
 
-func (j *journal) append(id string, a Activity) error {
+// append writes an activity with the next number of its session (1, 2,
+// …; a feed's lines in order) and returns it numbered.
+func (j *journal) append(id string, a Activity) (Activity, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	f, err := os.OpenFile(filepath.Join(j.dir, id+".jsonl"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	n, ok := j.seq[id]
+	if !ok {
+		existing, err := j.activitiesLocked(id)
+		if err != nil {
+			return a, err
+		}
+		for _, e := range existing { // the highest number, not the count
+			n = max(n, e.Seq)
+		}
+	}
+	a.Seq = n + 1
+	p := filepath.Join(j.dir, id+".jsonl")
+	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
-		return err
+		return a, err
 	}
 	defer f.Close()
+	// a torn last line (a crash mid-write) is closed first, so the new
+	// record stays a line of its own
+	if info, err := f.Stat(); err == nil && info.Size() > 0 {
+		last := make([]byte, 1)
+		if _, err := f.ReadAt(last, info.Size()-1); err == nil && last[0] != '\n' {
+			if _, err := f.Write([]byte{'\n'}); err != nil {
+				return a, err
+			}
+		}
+	}
 	data, err := json.Marshal(a)
 	if err != nil {
-		return err
+		return a, err
 	}
-	_, err = f.Write(append(data, '\n'))
-	return err
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		return a, err
+	}
+	j.seq[id] = a.Seq
+	return a, nil
 }
 
 func (j *journal) activities(id string) ([]Activity, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.activitiesLocked(id)
+}
+
+// activitiesLocked reads a feed; lines without a number (older journals)
+// are numbered by position.
+func (j *journal) activitiesLocked(id string) ([]Activity, error) {
 	f, err := os.Open(filepath.Join(j.dir, id+".jsonl"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -141,6 +184,12 @@ func (j *journal) activities(id string) ([]Activity, error) {
 		var a Activity
 		if err := json.Unmarshal(sc.Bytes(), &a); err != nil {
 			continue // a torn last line after a crash
+		}
+		if a.Seq == 0 { // a journal from before numbering: by position
+			a.Seq = len(out) + 1
+			if len(out) > 0 && out[len(out)-1].Seq >= a.Seq {
+				a.Seq = out[len(out)-1].Seq + 1
+			}
 		}
 		out = append(out, a)
 	}

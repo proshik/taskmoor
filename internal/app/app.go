@@ -45,8 +45,11 @@ type Report struct {
 	Source        string `json:"source"`
 	HarnessSource string `json:"harness_source"`
 	// Fingerprint summarises what this report read (see App.Fingerprint).
-	Fingerprint string     `json:"-"`
-	Tasks       []TaskView `json:"tasks"`
+	Fingerprint string `json:"-"`
+	// Conveyor marks a report taken from taskmoor serve: the board shows the
+	// conveyor's columns.
+	Conveyor bool       `json:"-"`
+	Tasks    []TaskView `json:"tasks"`
 }
 
 // TaskView is one task as `list --json` prints it.
@@ -69,6 +72,9 @@ type TaskView struct {
 	Harness     *harness.Record `json:"harness,omitempty"`
 
 	Task *project.Task `json:"-"`
+	// Column, when set, places the task on a conveyor board (ready,
+	// running, needs) instead of its lifecycle column.
+	Column string `json:"-"`
 }
 
 // StateView is a state file with its staleness.

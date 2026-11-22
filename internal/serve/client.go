@@ -104,6 +104,16 @@ func (c *Client) Snapshot(ctx context.Context) (*Snapshot, error) {
 	return &s, c.do(ctx, http.MethodGet, "/api/snapshot", nil, &s)
 }
 
+// Position is the service's (epoch, rev): it changes with every event.
+func (c *Client) Position(ctx context.Context) (string, int64, error) {
+	var out struct {
+		Epoch string `json:"epoch"`
+		Rev   int64  `json:"rev"`
+	}
+	err := c.do(ctx, http.MethodGet, "/api/position", nil, &out)
+	return out.Epoch, out.Rev, err
+}
+
 // Run starts a task.
 func (c *Client) Run(ctx context.Context, req RunRequest) (*Session, error) {
 	var s Session
@@ -156,6 +166,31 @@ func (c *Client) Release(ctx context.Context, id string) (*Session, string, erro
 	}
 	err := c.do(ctx, http.MethodPost, c.sessionPath(id, "release"), map[string]any{}, &out)
 	return out.Session, out.Lifecycle, err
+}
+
+// Open shows a session's worktree on the Mac ("finder" or "editor").
+func (c *Client) Open(ctx context.Context, id, with string) error {
+	return c.do(ctx, http.MethodPost, c.sessionPath(id, "open"), map[string]string{"with": with}, nil)
+}
+
+// Handover stops the session and hands it to the person's terminal; it
+// returns the command that continues it.
+func (c *Client) Handover(ctx context.Context, id string) (*Session, string, error) {
+	var out struct {
+		Session *Session `json:"session"`
+		Resume  string   `json:"resume"`
+	}
+	err := c.do(ctx, http.MethodPost, c.sessionPath(id, "handover"), map[string]any{}, &out)
+	return out.Session, out.Resume, err
+}
+
+// LoginURL asks for a one-time sign-in link for the browser.
+func (c *Client) LoginURL(ctx context.Context) (string, error) {
+	var out struct {
+		URL string `json:"url"`
+	}
+	err := c.do(ctx, http.MethodPost, "/api/login-code", map[string]any{}, &out)
+	return out.URL, err
 }
 
 // Answer answers an ask.

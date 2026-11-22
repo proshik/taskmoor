@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>taskmoor</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <span class="brand">taskmoor</span>
+  <select id="project" aria-label="Project"></select>
+  <span id="facts" class="facts"></span>
+  <span class="grow"></span>
+  <button id="inbox-btn" class="inbox-btn" type="button" aria-label="Inbox">Needs you <b id="inbox-count">0</b></button>
+  <span id="conn" class="conn" title="Connection to taskmoor serve">●</span>
+</header>
+<div id="banner" class="banner" hidden></div>
+<main id="board" class="board" aria-label="Board"></main>
+<aside id="panel" class="panel" hidden aria-label="Details">
+  <button id="panel-close" class="close" type="button" aria-label="Close">×</button>
+  <div id="panel-body"></div>
+</aside>
+<div id="signin" class="signin" hidden>
+  <h1>taskmoor</h1>
+  <p>This browser is not signed in to <code>taskmoor serve</code>.</p>
+  <p>Run <code>taskmoor web</code> in a terminal: it opens a one-time sign-in link.</p>
+  <p id="signin-msg" class="err"></p>
+</div>
+</body>
+</html>

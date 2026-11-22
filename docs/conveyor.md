@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-22; stage 1 is implemented.**
+2026-11-22; stages 1 and 2 are implemented.**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -446,7 +446,7 @@ stay in the service store or the Keychain (to be settled).
 
 | Where the person is | Path |
 | --- | --- |
-| At the Mac | `http://localhost:<port>` |
+| At the Mac | `http://127.0.0.1:<port>` (the address of the sign-in link) |
 | Laptop elsewhere | `ssh -J <vps>` to the Mac, then a local forward to the service (details to be settled) |
 | Phone / any browser (v2) | `https://<vps-domain>` → Caddy (HTTPS, passkey login) → the reverse tunnel → the service (per-device token) |
 
@@ -730,10 +730,98 @@ The smallest loop that runs a real agent on a real task.
   forms (recommended option first). No framework decision is taken here:
   stage 2 starts by proposing the web stack to the person (a library versus
   plain server-rendered HTML), per the person's rule.
-- The browser gets the API token through a one-time link `taskmoor serve`
-  prints (or `taskmoor web` opens), then a cookie bound to `localhost`.
+- The browser signs in through a one-time link `taskmoor serve` prints (or
+  `taskmoor web` opens); see the implementation decisions below.
 - The TUI shows the conveyor's columns when the service runs (A21) and the
   phase-0 board when it does not.
+
+#### Stage 2 — implementation decisions (2026-11-22)
+
+1. **Stack (the person's choice):** Go `net/http` serves an embedded
+   `index.html`, `app.css` and a dependency-free `app.js` (`go:embed`); no
+   framework, no build step. The page renders from `GET /api/snapshot` and
+   follows `GET /api/events`; every text from tasks and agents is set with
+   `textContent`, and a Content-Security-Policy allows only the page's own
+   scripts and styles.
+2. **Browser sign-in (changed after review r1: no cookie).** A one-time
+   code (10 minutes, single use) arrives in the link's fragment
+   (`http://127.0.0.1:PORT/#code=…`, from the startup log or `taskmoor
+   web`), which the browser never sends to a server; the page trades it
+   (`POST /api/sign-in`) for a browser token valid 30 days and keeps it in
+   `localStorage`, which belongs to this origin — host and port — alone.
+   Every request carries it in `Authorization`, the event stream is read
+   with `fetch`, so no other local port receives a credential and no page
+   of another origin has one to act with (no CSRF surface). The service
+   keeps only the token's SHA-256 in `<store>/web-sessions.json` (0600)
+   and spends the code only once that is saved, so a restart does not sign
+   the browser out. Open the board at the link's `127.0.0.1` address:
+   `localhost` is another origin with its own (empty) storage.
+3. **Columns** are derived in the client: backlog not ready → Backlog,
+   ready → Ready, `in_progress` with the session waiting for the person →
+   Needs you, other `in_progress` → Running, then Review, Merged, Done;
+   cancelled tasks are not shown.
+4. **Run** preselects the routed profile (the snapshot carries each backlog
+   task's route, C10); profiles of harnesses a later stage adds are shown
+   disabled; a `needs_person` task needs the person's checkbox (A4).
+5. **Continue in terminal (C12)** is `POST …/handover`: the runner stops,
+   the state file keeps the claim with harness `unknown` and no
+   `session`, the service drops its owner lock, and the session becomes
+   `handedOver`; the person continues with the shown command and finishes
+   with `taskmoor review`. The CLI has `taskmoor continue ID`.
+6. **Open the worktree** runs `open DIR` or the configured `editor`
+   command with the worktree as its last argument, on the Mac.
+7. **Changes outside the service** (merges, tags, the CLI's state writes)
+   reach clients through a watcher that polls each project's fingerprint
+   every 2 s and publishes a `tasks` event.
+8. **Disconnected ≠ Ended (C5).** The page marks itself Disconnected when
+   the stream or a snapshot fails, keeps the last view, and retries; any
+   message on a new stream, or a snapshot that succeeds, clears it. The
+   event stream flushes its headers at once, and Shutdown ends every
+   stream so open browsers never hold the service.
+9. **TUI as a client (A21).** When the default store's service runs and
+   has the project registered, the TUI reads its snapshot and shows the
+   conveyor's columns; the local project still gives the header, the task
+   bodies and the refresh fingerprint (plus the service's `(epoch, rev)`).
+   Actions stay in the web and the CLI.
+10. **Checked in a real browser** (agent-browser, the fake Claude): sign in
+    by the link, Run, the question in Needs you and the inbox, the answer,
+    the task in Review, Say resuming, Continue in terminal, a CLI release
+    showing up on the open board, Disconnected while the service was down
+    and reconnecting signed in after its restart. The check found and fixed:
+    nested children rendered as text, `null` in the panel, the event stream
+    holding Shutdown, unflushed stream headers, and a session completing
+    while the service stopped being recorded as stopped.
+11. **Review r1 (20 findings, all confirmed), fixed:** the cookie went
+    (decision 2); a handover holds the session's launch admission from
+    start to end, records itself before the claim changes (Open finishes an
+    interrupted one) and repeats idempotently; a resume records `pending`
+    before its process starts; the watcher announces a project's first
+    look and a removed project; feed activities carry a journal number
+    (`seq`) and the page merges history and stream by it, reloading the
+    open feed after a reconnect or reset; snapshots are requested one at a
+    time and an older one never replaces a newer; drafts, choices and focus
+    survive redraws; a failed route preselects no profile; responses for a
+    card no longer open are dropped and a failed feed load is retried after
+    a pause; the TUI picks the service or the local project at every load
+    and stays local with `--source worktree`; the stream test checks the
+    headers arrive before any event.
+12. **Review r2 (25 findings, all confirmed), fixed:** a handover records
+    its intent (`handover_pending`) before letting go of the claim and is
+    complete only after; concurrent requests are refused while one runs;
+    Open finishes a pending one; a resume writes `pending` durably before
+    its process starts, or does not start; the journal closes a torn last
+    line before appending and numbers from the highest valid number; the
+    snapshot takes its position before reading; the watcher keys projects
+    by name and path, announces registrations (loadable or not), removals
+    and configuration changes; a session belongs to its project's
+    registered path; the board keeps its stream on a reset, refreshes at
+    most 250 ms after the first event of a burst, reloads the open feed
+    until a load started after a gap succeeds, ignores older body
+    responses, clears only the instruction it sent, sends a profile only
+    when the person picked one, signs in from a link pasted into an open
+    tab and shows an error when sign-in fails; a stream ends when its
+    browser token expires; the TUI keeps a valid column when the set of
+    columns changes; `feed --follow --json` keeps `seq`.
 
 ### Stage 2b — the agents in Claude's sandbox (C13)
 
