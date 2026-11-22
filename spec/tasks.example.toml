@@ -1,0 +1,33 @@
+# tasks/tasks.toml — the project's task configuration (taskmoor task format,
+# format = 1; see spec/README.md). Unknown keys are an error.
+
+format = 1
+
+[project]
+# A task's id is "<id_prefix>-<number>", three digits at least: PRJ-001.
+id_prefix = "PRJ"
+# The local branch whose first-parent history decides `merged`.
+main_branch = "main"
+
+# A component is a deliverable with its own release rule. A task names one.
+#
+# rule = "tag"   — `done` when a tag matching `pattern` contains the task's merge commit.
+# rule = "merge" — the component ships nothing separately; `done` once `merged`.
+
+[components.app]
+paths = ["src/**", "assets/**"]
+release = { rule = "tag", pattern = "v*" }
+
+[components.docs]
+paths = ["docs/**", "tasks/**", "README.md"]
+release = { rule = "merge" }
+
+# Optional. Which agent profile a launcher runs a task of each kind with.
+# Keys: `default` and the kinds (feature, fix, chore, research, design).
+# Values are profile names defined by the launcher's configuration, not here.
+# A task's own `profile` / `model` wins over this table.
+[routing]
+default = "codex-default"
+feature = "claude-main"
+fix = "codex-default"
+research = "opencode-custom"

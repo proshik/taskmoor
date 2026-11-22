@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "state.schema.json",
+  "title": "Shared task state",
+  "description": "$(git rev-parse --git-common-dir)/tasks/state/<ID>.json — the changing part of a task's status, shared by every worktree and never committed. Written by the launcher or the CLI, never by the agent. See the taskmoor task format, spec/README.md (format = 1).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "id", "lifecycle", "worktree", "branch", "base", "started_at", "updated_at", "writer"],
+  "properties": {
+    "format": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]*-[0-9]{3,}$"
+    },
+    "lifecycle": {
+      "description": "Only the two lifecycle values git and the task file cannot answer.",
+      "enum": ["in_progress", "review"]
+    },
+    "worktree": {
+      "description": "Absolute path of the task's worktree.",
+      "type": "string",
+      "pattern": "^/"
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "base": {
+      "description": "The main-branch commit the task's branch started from.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,64}$"
+    },
+    "started_at": {
+      "$ref": "#/$defs/time"
+    },
+    "updated_at": {
+      "$ref": "#/$defs/time"
+    },
+    "writer": {
+      "description": "The program that wrote this version, with its version.",
+      "type": "string",
+      "minLength": 1
+    },
+    "harness": {
+      "description": "Absent until a harness is launched for the task.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status", "observed_at"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "status": {
+          "description": "The OSC 7501 root record's state, or what the terminal knows without one.",
+          "enum": ["idle", "working", "blocked", "done", "error", "unknown", "exited"]
+        },
+        "kind": {
+          "description": "Why the program is blocked, only when it reported a reason.",
+          "enum": ["permission", "question", "auth"]
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/time"
+        },
+        "session": {
+          "description": "The harness's own id of the running session, when the launcher knows it; readers match the running program by it before falling back to the worktree.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["kind"] },
+          "then": { "properties": { "status": { "const": "blocked" } } }
+        },
+        {
+          "if": { "required": ["exit_code"] },
+          "then": { "properties": { "status": { "const": "exited" } } }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "time": {
+      "description": "RFC 3339 date-time in UTC.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+    }
+  }
+}
