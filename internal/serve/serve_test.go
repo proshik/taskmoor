@@ -329,7 +329,7 @@ func TestRunAQuestionAndCompletion(t *testing.T) {
 	args, inputs, env := rg.fakeLog()
 	joined := strings.Join(args[0], " ")
 	for _, want := range []string{"-p", "--input-format stream-json", "--output-format stream-json", "--permission-prompt-tool stdio",
-		"--permission-mode default", `--settings {"permissions":{"ask":["Bash","Read","Write","Edit"`, "--disallowedTools Bash(git push:*)",
+		"--permission-mode default", `"permissions":{"ask":["Bash","Read","Write","Edit"`, `"sandbox":{"allowUnsandboxedCommands":false`, "--setting-sources= --strict-mcp-config", "--disallowedTools Bash(git push:*)",
 		"Bash(kubectl apply:*)", "Bash(terraform apply:*)", "--session-id " + s.ID} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("args %q lack %q", joined, want)
@@ -722,7 +722,20 @@ func TestRefusedResumeKeepsReview(t *testing.T) {
 	_ = rg.client.Answer(context.Background(), a.ID, serve.Answer{Allow: true})
 	rg.waitState(s.ID, serve.StateComplete)
 	eventually(t, "review", func() bool { return rg.stateFile("TM-001")["lifecycle"] == "review" })
-	// the worktree now makes Claude bill an API key
+	// confined: a worktree whose .git no longer names its own git
+	// directory gives the sandbox nothing safe to allow
+	gitFile := filepath.Join(s.Worktree, ".git")
+	orig, _ := os.ReadFile(gitFile)
+	_ = os.WriteFile(gitFile, []byte("gitdir: /tmp\n"), 0o644)
+	if _, err := rg.client.Say(context.Background(), s.ID, "more"); err == nil || !strings.Contains(err.Error(), "git directory") {
+		t.Fatalf("err %v", err)
+	}
+	if lc := rg.stateFile("TM-001")["lifecycle"]; lc != "review" {
+		t.Fatalf("lifecycle %v after a refused confined resume", lc)
+	}
+	_ = os.WriteFile(gitFile, orig, 0o644)
+	// unconfined, the worktree now makes Claude bill an API key
+	unconfine(t, rg)
 	if err := os.MkdirAll(filepath.Join(s.Worktree, ".claude"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -817,6 +830,7 @@ func TestReleaseThroughTheService(t *testing.T) {
 func TestPreflightRefusesBeforeCreatingAnything(t *testing.T) {
 	repo := newRepo(t)
 	rg := start(t, repo, "wait")
+	unconfine(t, rg) // a confined run does not load these settings
 	// the person's Claude settings put an API key in env
 	if err := os.MkdirAll(filepath.Join(rg.home, ".claude"), 0o755); err != nil {
 		t.Fatal(err)
@@ -839,4 +853,160 @@ func TestPreflightRefusesBeforeCreatingAnything(t *testing.T) {
 	if out := repo.Git("branch", "--list", "task/*"); out != "" {
 		t.Fatalf("branch made: %s", out)
 	}
+}
+
+func TestSandboxedAndUnconfinedLaunches(t *testing.T) {
+	repo := newRepo(t, testrepo.Task{ID: "TM-001"}, testrepo.Task{ID: "TM-002", Touches: []string{"other/**"}})
+	rg := start(t, repo, "wait")
+	cfg, _ := serve.LoadConfig(rg.paths.Config)
+	off := false
+	cfg.Profiles = append(cfg.Profiles, serve.Profile{Name: "open", Harness: "claude", Command: cfg.Profiles[0].Command, Sandbox: &off})
+	_ = cfg.Save(rg.paths.Config)
+	ctx := context.Background()
+	a, err := rg.client.Run(ctx, serve.RunRequest{Project: "repo", Task: "TM-001"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := rg.client.Run(ctx, serve.RunRequest{Project: "repo", Task: "TM-002", Profile: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Confined || b.Confined {
+		t.Fatalf("confined %v %v", a.Confined, b.Confined)
+	}
+	eventually(t, "two processes", func() bool { starts, _ := rg.lifetimes(); return starts == 2 })
+	args, _, _ := rg.fakeLog()
+	settings := func(argv []string) string {
+		for i, x := range argv {
+			if x == "--settings" {
+				return argv[i+1]
+			}
+		}
+		return ""
+	}
+	byID := map[string]string{}
+	for _, argv := range args {
+		for i, x := range argv {
+			if x == "--session-id" {
+				byID[argv[i+1]] = settings(argv)
+			}
+		}
+	}
+	if !strings.Contains(byID[a.ID], `"enabled":true`) || !strings.Contains(byID[a.ID], rg.paths.Store) {
+		t.Errorf("sandboxed settings %s", byID[a.ID])
+	}
+	if !strings.Contains(byID[b.ID], `"enabled":false`) {
+		t.Errorf("unconfined settings %s", byID[b.ID])
+	}
+}
+
+// A resume runs under the profile as it is now, and the session says so,
+// also after a restart.
+func TestResumeFollowsTheProfilesSandbox(t *testing.T) {
+	repo := newRepo(t)
+	rg := start(t, repo, "approval")
+	ctx := context.Background()
+	s, _ := rg.client.Run(ctx, serve.RunRequest{Project: "repo", Task: "TM-001"})
+	a := rg.waitAsk()
+	_ = rg.client.Answer(ctx, a.ID, serve.Answer{Allow: true})
+	rg.waitState(s.ID, serve.StateComplete)
+	if !rg.session(s.ID).Confined {
+		t.Fatal("not confined")
+	}
+	setSandbox := func(on bool) {
+		cfg, _ := serve.LoadConfig(rg.paths.Config)
+		cfg.Profiles[0].Sandbox = &on
+		if err := cfg.Save(rg.paths.Config); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lastSettings := func() string {
+		args, _, _ := rg.fakeLog()
+		argv := args[len(args)-1]
+		for i, x := range argv {
+			if x == "--settings" {
+				return argv[i+1]
+			}
+		}
+		return ""
+	}
+	setSandbox(false)
+	if _, err := rg.client.Say(ctx, s.ID, "more"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the second run", func() bool { starts, _ := rg.lifetimes(); return starts == 2 })
+	if !strings.Contains(lastSettings(), `"enabled":false`) || rg.session(s.ID).Confined {
+		t.Fatalf("the resume kept the old profile: %s", lastSettings())
+	}
+	rg.waitState(s.ID, serve.StateComplete)
+	rg.stop()
+	setSandbox(true)
+	rg.open([]string{"FAKE_SCENARIO=approval", "FAKE_LOG=" + rg.log})
+	if rg.session(s.ID).Confined {
+		t.Fatal("the record lost the last run's flag")
+	}
+	if _, err := rg.client.Say(ctx, s.ID, "again"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the third run", func() bool { starts, _ := rg.lifetimes(); return starts == 3 })
+	if !strings.Contains(lastSettings(), `"enabled":true`) || !rg.session(s.ID).Confined {
+		t.Fatalf("resumed after a restart: %s", lastSettings())
+	}
+}
+
+func TestAnOldClaudeIsRefusedForASandboxedProfile(t *testing.T) {
+	repo := newRepo(t)
+	rg := start(t, repo, "wait", "FAKE_VERSION=2.1.100")
+	_, err := rg.client.Run(context.Background(), serve.RunRequest{Project: "repo", Task: "TM-001"})
+	if err == nil || !strings.Contains(err.Error(), "older than") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func unconfine(t *testing.T, rg *rig) {
+	t.Helper()
+	cfg, _ := serve.LoadConfig(rg.paths.Config)
+	off := false
+	cfg.Profiles[0].Sandbox = &off
+	if err := cfg.Save(rg.paths.Config); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A confined run loads none of the person's settings, so an API key there
+// does not refuse it (init still reports the billing source).
+func TestConfinedRunIgnoresSettingsItDoesNotLoad(t *testing.T) {
+	repo := newRepo(t)
+	rg := start(t, repo, "wait")
+	_ = os.MkdirAll(filepath.Join(rg.home, ".claude"), 0o755)
+	_ = os.WriteFile(filepath.Join(rg.home, ".claude", "settings.json"), []byte(`{"apiKeyHelper":"x"}`), 0o644)
+	if _, err := rg.client.Run(context.Background(), serve.RunRequest{Project: "repo", Task: "TM-001"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The resumed run's record says pending with its own confinement before
+// the process has said anything.
+func TestPendingResumeRecordCarriesItsConfinement(t *testing.T) {
+	repo := newRepo(t)
+	rg := start(t, repo, "approval", "FAKE_RESUME_HOLD=1")
+	ctx := context.Background()
+	s, _ := rg.client.Run(ctx, serve.RunRequest{Project: "repo", Task: "TM-001"})
+	a := rg.waitAsk()
+	_ = rg.client.Answer(ctx, a.ID, serve.Answer{Allow: true})
+	rg.waitState(s.ID, serve.StateComplete)
+	unconfine(t, rg)
+	if _, err := rg.client.Say(ctx, s.ID, "more"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(rg.paths.Store, "sessions", s.ID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec map[string]any
+	_ = json.Unmarshal(data, &rec)
+	if rec["state"] != serve.StatePending || rec["confined"] != false {
+		t.Fatalf("on disk: state %v confined %v", rec["state"], rec["confined"])
+	}
+	_, _ = rg.client.Stop(ctx, s.ID)
 }

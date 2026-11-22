@@ -341,6 +341,7 @@ function card(project, t, sess, col) {
   if (sess && (col === "running" || col === "needs" || col === "review" || !ENDED.has(sess.state))) {
     meta.push(h("span", { class: "st-" + sess.state }, "● " + stateWord(sess.state)));
     if (sess.billing) meta.push(billingChip(sess.billing));
+    if (!sess.confined) meta.push(h("span", { class: "chip api", title: "the agent's commands run without the sandbox" }, "unconfined"));
   } else if (t.harness) {
     meta.push(h("span", { class: "st-" + t.harness.status }, "● " + t.harness.status));
   }
@@ -462,7 +463,7 @@ function runForm(p, t) {
   const select = draft(h("select", { "aria-label": "Profile" },
     h("option", { value: "", selected: !route.profile, disabled: true }, "Choose a profile…"),
     S.snap.profiles.map(pr => h("option", { value: pr.name, selected: pr.name === route.profile, disabled: !pr.runnable },
-      pr.name + " (" + pr.harness + (pr.model ? ", " + pr.model : "") + (pr.api_billing ? ", API key" : "") + ")" + (pr.runnable ? "" : " — later stage")))), key + ":profile");
+      pr.name + " (" + pr.harness + (pr.model ? ", " + pr.model : "") + (pr.api_billing ? ", API key" : "") + (pr.confined ? "" : ", unconfined") + ")" + (pr.runnable ? "" : " — later stage")))), key + ":profile");
   const person = t.needs_person ? draft(h("input", { type: "checkbox" }), key + ":person") : null;
   const err = h("div", { class: "err" });
   const run = h("button", { class: "primary", type: "button", disabled: !select.value, onclick: async () => {
@@ -502,6 +503,10 @@ function sessionView(sess) {
       h("dt", {}, "state"), h("dd", { class: "st-" + sess.state }, stateWord(sess.state) + (sess.error ? " — " + sess.error : "")),
       h("dt", {}, "profile"), h("dd", {}, sess.profile + (sess.model ? " · " + sess.model : "")),
       h("dt", {}, "billing"), h("dd", {}, sess.billing ? billingChip(sess.billing) : "—"),
+      h("dt", {}, "sandbox"), h("dd", {}, sess.state === "handedOver"
+        ? "taskmoor's last run: " + (sess.confined ? "on" : "off") + "; in the terminal, your own Claude settings apply"
+        : sess.confined ? "on: files, network and credentials confined"
+        : h("span", { class: "chip api" }, "off — the agent's commands run as you")),
       h("dt", {}, "worktree"), h("dd", { class: "mono" }, sess.worktree),
       h("dt", {}, "resume"), h("dd", { class: "mono" }, sess.resume)),
     h("div", { class: "actions" },

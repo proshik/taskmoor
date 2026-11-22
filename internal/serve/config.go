@@ -75,6 +75,17 @@ type Profile struct {
 	// Command overrides the harness program (default: the harness name on
 	// PATH), e.g. a wrapper or a test double.
 	Command string `toml:"command,omitempty"`
+	// Sandbox confines the agent's commands (C13); on unless set to false.
+	Sandbox *bool `toml:"sandbox,omitempty"`
+	// AllowedDomains are the hosts the agent's commands may reach (default
+	// DefaultAllowedDomains; an empty list allows none).
+	// No omitempty: an explicit empty list must survive a save.
+	AllowedDomains []string `toml:"allowed_domains"`
+}
+
+// Confined reports whether the profile's sessions run in the sandbox.
+func (p Profile) Confined() bool {
+	return p.Harness == "claude" && (p.Sandbox == nil || *p.Sandbox)
 }
 
 var nameRe = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)

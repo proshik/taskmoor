@@ -49,3 +49,22 @@ func TestLoadConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestAnEmptyDomainListSurvivesASave(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	_ = os.WriteFile(p, []byte("[[profiles]]\nname = \"x\"\nharness = \"claude\"\nallowed_domains = []\n\n[[profiles]]\nname = \"y\"\nharness = \"claude\"\n"), 0o600)
+	cfg, err := serve.LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Save(p); err != nil { // as `project add` does
+		t.Fatal(err)
+	}
+	again, _ := serve.LoadConfig(p)
+	if d := again.Profiles[0].AllowedDomains; d == nil || len(d) != 0 {
+		t.Fatalf("x: %#v", d)
+	}
+	if d := again.Profiles[1].AllowedDomains; d != nil {
+		t.Fatalf("y: %#v", d)
+	}
+}

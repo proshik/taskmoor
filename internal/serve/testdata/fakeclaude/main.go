@@ -68,12 +68,28 @@ func result(text string) {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		v := os.Getenv("FAKE_VERSION")
+		if v == "" {
+			v = "2.1.330"
+		}
+		fmt.Println(v + " (Claude Code)")
+		return
+	}
 	var err error
 	log, err = os.OpenFile(os.Getenv("FAKE_LOG"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
 		os.Exit(9)
 	}
-	record("args", os.Args[1:])
+	argv := append([]string(nil), os.Args[1:]...)
+	for i := range argv {
+		if argv[i] == "--settings" && i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "{") {
+			if data, err := os.ReadFile(argv[i+1]); err == nil {
+				argv[i+1] = string(data) // the tests read what Claude would
+			}
+		}
+	}
+	record("args", argv)
 	record("start", os.Getpid())
 	defer record("exit", os.Getpid())
 	record("env", map[string]string{"ANTHROPIC_API_KEY": os.Getenv("ANTHROPIC_API_KEY"), "pwd": func() string { d, _ := os.Getwd(); return d }()})

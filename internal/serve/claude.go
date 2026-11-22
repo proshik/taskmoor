@@ -65,7 +65,15 @@ type claudeStart struct {
 	Model     string
 	// APIBilling keeps API-key variables in the environment.
 	APIBilling bool
-	Env        []string // the base environment
+	// Sandbox confines the session's commands; nil runs them unconfined.
+	Sandbox *sandboxPlan
+	// Protected are taskmoor's own files, denied to every file tool.
+	Protected []string
+	// SettingsFile receives the settings JSON (it grows with the
+	// repository's branches, past what one argument may hold); empty: the
+	// JSON goes on the command line.
+	SettingsFile string
+	Env          []string // the base environment
 }
 
 // claudeArgs is the command line of a session.
@@ -77,8 +85,15 @@ func claudeArgs(s claudeStart) []string {
 		"--permission-mode", "default",
 		// A11 as deny rules, which win over any allow rule in the person's
 		// settings; the host's rules catch the forms these prefixes miss
-		"--settings", askSettings,
-		"--disallowedTools"}
+		"--settings", settingsArg(s)}
+	if s.Sandbox != nil {
+		// only taskmoor's settings: the person's and the repository's could
+		// add hooks, MCP servers, excluded commands or allowed hosts, which
+		// run or reach outside the sandbox (the worktree's .claude/ is the
+		// agent's to write)
+		args = append(args, "--setting-sources=", "--strict-mcp-config")
+	}
+	args = append(args, "--disallowedTools")
 	args = append(args, deniedTools...)
 	if s.Resume {
 		args = append(args, "--resume", s.SessionID)
@@ -89,6 +104,17 @@ func claudeArgs(s claudeStart) []string {
 		args = append(args, "--model", s.Model)
 	}
 	return args
+}
+
+func settingsArg(s claudeStart) string {
+	js := sessionSettings(s.Sandbox, s.Protected)
+	if s.SettingsFile == "" {
+		return js
+	}
+	if err := os.WriteFile(s.SettingsFile, []byte(js), 0o600); err != nil {
+		return js // too long for an argument, it fails at start, visibly
+	}
+	return s.SettingsFile
 }
 
 // deniedTools are Claude permission rules an agent session never gets past.
@@ -105,13 +131,6 @@ var deniedTools = []string{
 	"Bash(terraform apply:*)", "Bash(terraform destroy:*)", "Bash(tofu apply:*)", "Bash(tofu destroy:*)",
 	"Bash(fly deploy:*)", "Bash(flyctl deploy:*)", "Bash(vercel deploy:*)", "Bash(netlify deploy:*)", "Bash(heroku releases:*)",
 }
-
-// askSettings makes Claude ask the host for every command, read, edit and
-// fetch, whatever allow rules the person's or the project's settings hold:
-// ask rules win over allow rules, so the service's rules see every such
-// call; a sandbox, if the person enables one, must not auto-approve Bash
-// past the host either.
-const askSettings = `{"permissions":{"ask":["Bash","Read","Write","Edit","MultiEdit","NotebookEdit","WebFetch"]},"sandbox":{"autoAllowBashIfSandboxed":false}}`
 
 // apiKeyVars are stripped unless the profile allows API billing (C2).
 var apiKeyVars = map[string]bool{"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true}

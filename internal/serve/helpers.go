@@ -48,7 +48,8 @@ func assignment(t app.TaskView, snap *project.Snapshot, wt, branch string) strin
 	fmt.Fprintf(&b, "- Never push, publish or deploy, and never merge into %s: the person does that after accepting the work.\n", snap.Config.Project.MainBranch)
 	b.WriteString("- Work to the Acceptance list, run what Checks says, keep to Limits. Tick the Acceptance boxes in the task file on your branch as they are met.\n")
 	b.WriteString("- If you need a decision, ask with AskUserQuestion from the main conversation (not from a subagent), with the recommended option first, labelled \"(Recommended)\".\n")
-	b.WriteString("- When the work is finished and committed, say so in a short final summary.\n\n")
+	b.WriteString("- When the work is finished and committed, say so in a short final summary.\n")
+	b.WriteString("- Read the repository's own instructions first, if it has them: CLAUDE.md, AGENTS.md and .claude/rules/ (they may not be loaded for you).\n\n")
 	fmt.Fprintf(&b, "The task file (%s):\n\n", t.File)
 	if data, err := os.ReadFile(filepath.Join(wt, t.File)); err == nil {
 		b.Write(data)

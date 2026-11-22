@@ -57,6 +57,8 @@ type Session struct {
 	Error    string  `json:"error,omitempty"`
 	// Resume is the command that continues the conversation in a terminal.
 	Resume string `json:"resume"`
+	// Confined: the agent's commands run in Claude's sandbox (C13).
+	Confined bool `json:"confined"`
 	// ProjectPath is the registered repository the session belongs to: a
 	// project name reused for another repository does not inherit it.
 	ProjectPath string `json:"project_path,omitempty"`

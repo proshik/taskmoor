@@ -61,11 +61,66 @@ type Rules struct {
 	MainBranch string
 	// MainCheckout is the repository's main worktree, never to be written.
 	MainCheckout string
+	// Protected are taskmoor's own files (the service store with its API
+	// token, the configuration): refused to every tool.
+	Protected []string
 }
+
+// touchesProtected reports a path inside a protected directory.
+func (r Rules) touchesProtected(p string) (string, bool) {
+	if p == "" {
+		return "", false
+	}
+	abs := r.abs(p)
+	if rp, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = rp
+	}
+	for _, d := range r.Protected {
+		d = filepath.Clean(d)
+		if rd, err := filepath.EvalSymlinks(d); err == nil {
+			d = rd
+		}
+		if within(abs, d) {
+			return d, true
+		}
+	}
+	return "", false
+}
+
+// within reports p inside or equal to d: by name, ignoring case (macOS
+// volumes usually ignore it), and by file identity of p's existing
+// ancestors, whatever their spelling.
+func within(p, d string) bool {
+	lp, ld := strings.ToLower(p), strings.ToLower(d)
+	if lp == ld || strings.HasPrefix(lp, ld+"/") {
+		return true
+	}
+	di, err := os.Stat(d)
+	if err != nil {
+		return false
+	}
+	for a := p; ; a = filepath.Dir(a) {
+		if ai, err := os.Stat(a); err == nil && os.SameFile(ai, di) {
+			return true
+		}
+		if a == filepath.Dir(a) {
+			return false
+		}
+	}
+}
+
+const protectedReason = "taskmoor's own files (its store and configuration) are out of an agent's reach"
 
 // Decide checks one tool call. AskUserQuestion never comes here: it is a
 // question, always the person's in this stage.
 func (r Rules) Decide(tool string, input map[string]any) Verdict {
+	for _, k := range []string{"file_path", "notebook_path", "path"} {
+		if p, _ := input[k].(string); p != "" {
+			if _, ok := r.touchesProtected(p); ok {
+				return Verdict{Deny, protectedReason}
+			}
+		}
+	}
 	switch tool {
 	case "Bash":
 		cmd, _ := input["command"].(string)
@@ -117,6 +172,11 @@ func (r Rules) write(p string) Verdict {
 
 func (r Rules) command(cmd string) Verdict {
 	c := strings.TrimSpace(cmd)
+	for _, d := range r.Protected {
+		if d != "" && strings.Contains(strings.ToLower(c), strings.ToLower(filepath.Clean(d))) {
+			return Verdict{Deny, protectedReason}
+		}
+	}
 	for _, re := range denyCommands {
 		if re.MatchString(c) {
 			return Verdict{Deny, "push, publish and deploy stay the person's: an agent session never runs them"}

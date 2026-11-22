@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-22; stages 1 and 2 are implemented.**
+2026-11-22; stages 1, 2 and 2b are implemented.**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -834,6 +834,105 @@ The smallest loop that runs a real agent on a real task.
   outside the worktree and reach a denied host, and shows each refused.
 - The other harnesses (stage 3) get the equivalent of their own, or are
   marked unconfined in the UI until they do.
+
+#### Stage 2b — implementation decisions (2026-11-22)
+
+1. **Settings per session.** The `--settings` JSON is built per session:
+   the ask rules as before plus `sandbox.enabled`, `failIfUnavailable`,
+   `autoAllowBashIfSandboxed = false` and `allowUnsandboxedCommands =
+   false`. `--settings` outranks project settings, so a repository cannot
+   loosen it.
+2. **Writes.** The worktree, the repository's common git directory (a
+   commit writes objects, refs and the worktree's index there), temporary
+   directories and build caches (`~/Library/Caches`, `~/.cache`,
+   `~/go/pkg/mod`, npm, cargo, gradle, maven). Denied inside it: `hooks`,
+   `config` and `info` (code git would later run outside the sandbox) and
+   `tasks/` (taskmoor's state files: an agent cannot claim, release or
+   mark a task itself).
+3. **Reads.** Denied: the service store and the configuration directory,
+   and the person's credential files (list in README). Everything else
+   stays readable, so builds find their toolchains.
+4. **Network.** `allowed_domains` in the profile, default
+   `DefaultAllowedDomains` (registries, GitHub for reading);
+   `strictAllowlist`, so an unknown host is refused without a prompt; an
+   empty list allows none.
+5. **The host's rules** refuse Read/Write/Edit/Grep/Glob paths and Bash
+   commands that name taskmoor's store or configuration: Claude's file
+   tools run outside the sandbox.
+6. **Unconfined** is a profile choice (`sandbox = false`); the session
+   records `confined`, the board and `taskmoor sessions` show
+   `unconfined`. Profiles of other harnesses are unconfined until stage 3
+   gives them an equivalent.
+7. **Real check, round 0** (claude 2.1.330, Sonnet, one session on a probe
+   repository): reading the API token and `~/.ssh`, writing to the home
+   directory and to the main repository's `.git/hooks` (also after the
+   person allowed the command at the host), and `example.com` were
+   refused; `proxy.golang.org`, writes in the worktree and `git commit`
+   worked. The same probe outside the sandbox read the token and `~/.ssh`
+   and wrote to the home directory.
+8. **Review r1 (16 findings, all confirmed), fixed:**
+   - a confined session loads only taskmoor's settings
+     (`--setting-sources=` and `--strict-mcp-config`) with
+     `disableAllHooks`: the person's and the repository's settings could
+     add hooks, MCP servers, `excludedCommands` or allowed hosts, which run
+     or reach outside the sandbox; the agent can write the worktree's
+     `.claude/` itself;
+   - git writes are narrowed to the objects, the worktree's git directory
+     and the task branch's ref, lock and log; every other existing branch,
+     the main checkout's `HEAD`, index and `packed-refs`, and the
+     worktree's `.git` file are denied by name, so a writable directory
+     around the repository (a temporary one) does not reopen them; a new
+     branch can still be created;
+   - deny rules for taskmoor's files (both kinds of session) and the
+     credentials (confined) keep them out of the file tools, also in
+     recursive Grep and Glob;
+   - protected paths are compared ignoring case and by file identity of
+     the path's ancestors; the service makes its paths absolute;
+   - the credential list adds git's XDG store and relocated `gh`/`glab`
+     directories (`XDG_CONFIG_HOME`, `GH_CONFIG_DIR`);
+   - `allowed_domains = []` survives a configuration save;
+   - an unconfined session sets `sandbox.enabled = false`, so the person's
+     settings cannot turn it on behind the "unconfined" label;
+   - a resume reads the profile as it is now, and the session's
+     `confined` flag is saved with its `pending` state;
+   - a confined profile needs Claude Code ≥ 2.1.330 (the checked
+     version), refused at Run otherwise;
+   - not fixed, recorded: the sandbox is checked on macOS only (on Linux a
+     missing `~/.cache` is not created and stays unwritable); a startup
+     failure leaves the claim and worktree for `taskmoor release`.
+9. **Real check, after r1** (the same probe repository, which lives in a
+   temporary directory, the worst case for the write rules): moving
+   `main` with `git update-ref` was refused (the first attempt, before
+   branches were denied by name, moved it: the temporary directory's
+   allowance covered the repository), touching the worktree's `.git` and
+   writing `.git/hooks` were refused, the repository's SessionStart hook
+   did not run, the token stayed unreadable, and `git commit` on the task
+   branch worked.
+10. **Review r2 (17 findings, the last round), fixed:** managed settings
+    that turn the sandbox off refuse a confined launch; the executable is
+    resolved to one absolute path for the version probe and the launch,
+    and the probe has a 15 s deadline; the worktree's `.git` must name the
+    git directory the repository registered for it, or the launch is
+    refused; repositories on the reftable backend are refused; the main
+    checkout's `config.worktree` and the other worktrees' git directories
+    are denied by name; the plan is built before the task's state changes
+    (Run: before the claim; Say: before `in_progress`); the settings go in
+    a file in the store (`sessions/<id>.settings.json`, 0600), not on the
+    command line, so many branches do not overflow it; GitLab CLI and
+    Claude credential files are denied; literal paths are escaped in
+    permission rules; a confined launch skips the billing scan of
+    settings it does not load (init still reports the source); the
+    assignment tells the agent to read CLAUDE.md, AGENTS.md and
+    `.claude/rules/`; the board labels a handed-over session's sandbox as
+    the last taskmoor run. Recorded, not fixed: branches created after a
+    session started are not denied to it (the deny list is built per
+    launch); a rebase that rewrites tracked `.claude/` files fails in the
+    sandbox (Claude protects those paths); README gives the recovery for a
+    failed start.
+11. **Real check, after r2:** a resumed confined run with the settings
+    file: moving `main` refused, the token, the worktree's `.git` and
+    `.git/hooks` refused, an empty commit on the task branch made, the
+    repository's hook not run.
 
 ### Stage 3 — Codex and OpenCode, profiles and routing
 

@@ -329,7 +329,11 @@ func (r runner) sessionsCmd(ctx context.Context, args []string) int {
 		if bill == "" {
 			bill = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.Task, s.State, s.Profile, bill, s.StartedAt, s.ID, text.Line(s.Title))
+		box := "sandboxed"
+		if !s.Confined {
+			box = "UNCONFINED"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.Task, s.State, s.Profile, bill, box, s.StartedAt, s.ID, text.Line(s.Title))
 	}
 	tw.Flush()
 	return ExitOK

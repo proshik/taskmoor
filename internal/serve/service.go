@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -140,6 +139,15 @@ var errNotOurs = errors.New("the task's claim is no longer this session's")
 // store), then recovers the sessions left by a previous run — their
 // processes are gone, so they are stale.
 func Open(paths Paths, version string, env []string, home string) (*Service, error) {
+	// absolute: the rules and the sandbox compare them with absolute paths
+	// and Claude runs in another directory
+	for _, p := range []*string{&paths.Config, &paths.Store} {
+		abs, err := filepath.Abs(*p)
+		if err != nil {
+			return nil, err
+		}
+		*p = abs
+	}
 	if err := os.MkdirAll(paths.Store, 0o700); err != nil {
 		return nil, err
 	}
@@ -362,9 +370,16 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*Session, error) {
 	}
 	rec := &Session{ID: id, Project: p.Name, Task: t.ID, Title: t.Title, Profile: prof.Name, Harness: prof.Harness,
 		Model: prof.Model, Worktree: wt, Branch: branch, State: StatePending, StartedAt: now, UpdatedAt: now,
-		Resume: fmt.Sprintf("cd %s && claude --resume %s", shellQuote(wt), id), ProjectPath: p.Path}
+		Resume: fmt.Sprintf("cd %s && claude --resume %s", shellQuote(wt), id), ProjectPath: p.Path, Confined: prof.Confined()}
 	l := &live{s: rec, app: a, profile: *prof, pending: map[string]string{}, stateDir: rep.Snapshot.StateDir,
-		rules: Rules{Worktree: wt, MainBranch: rep.MainBranch, MainCheckout: root}}
+		rules: Rules{Worktree: wt, MainBranch: rep.MainBranch, MainCheckout: root, Protected: s.protected()}}
+	plan, err := s.sandboxFor(l) // refused here, nothing is claimed yet
+	if err != nil {
+		if kept := undoWorktree(repo, wt, branch, base); kept != "" {
+			err = fmt.Errorf("%w (%s)", err, kept)
+		}
+		return nil, err
+	}
 	// the launch is reserved before anything is published, so Release and
 	// Shutdown see it from the start
 	if err := s.reserve(l); err != nil {
@@ -402,7 +417,7 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*Session, error) {
 		}
 	}
 	s.publishSession(l)
-	if err := s.launch(l, false, assignment(t, rep.Snapshot, wt, branch)); err != nil {
+	if err := s.launch(l, false, assignment(t, rep.Snapshot, wt, branch), plan); err != nil {
 		return s.snapshotSession(id), err
 	}
 	return s.snapshotSession(id), nil
@@ -438,8 +453,18 @@ func (s *Service) preflight(prof Profile, dir string) error {
 	if prog == "" {
 		prog = "claude"
 	}
-	if _, err := exec.LookPath(prog); err != nil {
+	path, err := programPath(prof)
+	if err != nil {
 		return refusedf("%s is not on the service's PATH: install Claude Code and sign in (claude /login) first", prog)
+	}
+	if prof.Confined() {
+		if err := claudeVersionOK(path, s.Env); err != nil {
+			return refusedf("profile %s runs in the sandbox: %v", prof.Name, err)
+		}
+		if f := managedSandboxOff(); f != "" {
+			return refusedf("profile %s runs in the sandbox, but the managed Claude settings %s turn it off", prof.Name, f)
+		}
+		return nil // the person's and the repository's settings are not loaded (init still reports the billing)
 	}
 	if !prof.APIBilling {
 		if f, what := apiKeyInSettings(s.Home, envValue(s.Env, "CLAUDE_CONFIG_DIR"), dir); f != "" {
@@ -453,6 +478,48 @@ func (s *Service) isClosing() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.closing
+}
+
+func (s *Service) refreshProfile(l *live) error {
+	cfg, err := s.Config()
+	if err != nil {
+		return err
+	}
+	prof := cfg.Profile(l.s.Profile)
+	if prof == nil {
+		return refusedf("profile %s is no longer configured", l.s.Profile)
+	}
+	l.profile = *prof
+	return nil
+}
+
+// sandboxFor is the sandbox of a launch under the session's current
+// profile, or nil when the profile runs unconfined.
+func (s *Service) sandboxFor(l *live) (*sandboxPlan, error) {
+	if !l.profile.Confined() {
+		return nil, nil
+	}
+	common := filepath.Dir(filepath.Dir(l.stateDir))
+	gd, err := checkedGitDir(l.s.Worktree, common)
+	if err != nil {
+		return nil, refusedf("the sandbox needs the worktree's own git directory: %v", err)
+	}
+	if f, err := refFormat(common); err != nil || f != "files" {
+		return nil, refusedf("the sandbox protects branches only with git's files ref backend (this repository: %q %v)", f, err)
+	}
+	refs, err := branchRefs(common)
+	if err != nil {
+		return nil, fmt.Errorf("the sandbox needs the repository's branches: %w", err)
+	}
+	others, _ := filepath.Glob(filepath.Join(common, "worktrees", "*"))
+	return &sandboxPlan{Worktree: l.s.Worktree, GitDir: gd, CommonDir: common,
+		Branch: l.s.Branch, Store: s.Paths.Store, ConfigDir: filepath.Dir(s.Paths.Config), Home: s.Home,
+		Env: s.Env, Domains: l.profile.AllowedDomains, OtherRefs: refs, OtherWorktrees: others}, nil
+}
+
+// protected are the service's own files: no agent reads or writes them.
+func (s *Service) protected() []string {
+	return []string{s.Paths.Store, filepath.Dir(s.Paths.Config)}
 }
 
 // reserve admits one launch of a session: refused while the service is
@@ -482,7 +549,15 @@ func (s *Service) unreserve(l *live) {
 
 // launch starts the runner of a reserved session and sends its first
 // message; the reservation ends either way.
-func (s *Service) launch(l *live, resume bool, first string) error {
+func (s *Service) launch(l *live, resume bool, first string, plan *sandboxPlan) error {
+	prog, err := programPath(l.profile)
+	if err != nil {
+		s.unreserve(l)
+		return err
+	}
+	s.mu.Lock()
+	l.s.Confined = plan != nil // saved with the pending state below
+	s.mu.Unlock()
 	if resume {
 		// a fresh state for this run, written before it starts, so a stop
 		// before its init, or a restart, is not read as the previous run's
@@ -501,8 +576,9 @@ func (s *Service) launch(l *live, resume bool, first string) error {
 	}
 	h := &sessionHost{s: s, l: l}
 	s.runners.Add(1)
-	_, err := startClaude(claudeStart{Program: l.profile.Command, Dir: l.s.Worktree, SessionID: l.s.ID, Resume: resume,
-		Model: l.profile.Model, APIBilling: l.profile.APIBilling, Env: s.Env}, h)
+	_, err = startClaude(claudeStart{Program: prog, Dir: l.s.Worktree, SessionID: l.s.ID, Resume: resume,
+		Model: l.profile.Model, APIBilling: l.profile.APIBilling, Env: s.Env, Sandbox: plan, Protected: s.protected(),
+		SettingsFile: filepath.Join(s.Paths.Store, "sessions", l.s.ID+".settings.json")}, h)
 	s.unreserve(l)
 	if err != nil {
 		s.runners.Done()
@@ -571,6 +647,12 @@ func (s *Service) Say(ctx context.Context, id, text string) error {
 	if err := s.reserve(l); err != nil {
 		return err
 	}
+	// a resume runs under the profile as it is now (read while this
+	// launch holds the session, so no runner reads it meanwhile)
+	if err := s.refreshProfile(l); err != nil {
+		s.unreserve(l)
+		return err
+	}
 	// everything that can refuse runs before the task's state changes
 	if err := s.preflight(l.profile, l.s.Worktree); err != nil {
 		s.unreserve(l)
@@ -579,6 +661,11 @@ func (s *Service) Say(ctx context.Context, id, text string) error {
 	if !s.ownsClaim(l) {
 		s.unreserve(l)
 		return refusedf("%s's claim now belongs to another session (or is gone); this one cannot resume", l.s.Task)
+	}
+	plan, err := s.sandboxFor(l) // before the task's state changes
+	if err != nil {
+		s.unreserve(l)
+		return err
 	}
 	if err := s.holdOwner(l); err != nil {
 		s.unreserve(l)
@@ -597,7 +684,7 @@ func (s *Service) Say(ctx context.Context, id, text string) error {
 		}
 		return err
 	}
-	return s.launch(l, true, text)
+	return s.launch(l, true, text, plan)
 }
 
 // Release stops the session if it runs, removes the task's state file
@@ -666,7 +753,7 @@ func (s *Service) attach(l *live) error {
 		return err
 	}
 	l.app, l.profile, l.stateDir = a, *prof, rep.Snapshot.StateDir
-	l.rules = Rules{Worktree: l.s.Worktree, MainBranch: rep.MainBranch, MainCheckout: rep.Snapshot.Root}
+	l.rules = Rules{Worktree: l.s.Worktree, MainBranch: rep.MainBranch, MainCheckout: rep.Snapshot.Root, Protected: s.protected()}
 	return nil
 }
 
@@ -813,6 +900,7 @@ type ProfileView struct {
 	Model      string `json:"model,omitempty"`
 	APIBilling bool   `json:"api_billing,omitempty"`
 	Runnable   bool   `json:"runnable"`
+	Confined   bool   `json:"confined"`
 }
 
 // ProjectState is a registered project with its tasks.
@@ -843,7 +931,7 @@ func (s *Service) Snapshot(ctx context.Context) (*Snapshot, error) {
 	}
 	out := &Snapshot{Epoch: epoch, Rev: rev, Profiles: []ProfileView{}, Projects: []ProjectState{}, Sessions: []Session{}, Asks: []Ask{}}
 	for _, p := range cfg.Profiles {
-		out.Profiles = append(out.Profiles, ProfileView{Name: p.Name, Harness: p.Harness, Model: p.Model, APIBilling: p.APIBilling, Runnable: runnable[p.Harness]})
+		out.Profiles = append(out.Profiles, ProfileView{Name: p.Name, Harness: p.Harness, Model: p.Model, APIBilling: p.APIBilling, Runnable: runnable[p.Harness], Confined: p.Confined()})
 	}
 	for _, p := range cfg.Projects {
 		ps := ProjectState{Name: p.Name, Path: p.Path, Tasks: []app.TaskView{}, Routes: map[string]Route{}}

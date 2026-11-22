@@ -122,7 +122,8 @@ taskmoor release PRJ-007                # through the service: stops the session
   service is unreachable. The TUI shows the same columns when the service
   runs and has the project registered.
 - **Config** `~/.config/taskmoor/config.toml` (projects, profiles with
-  `harness`, `model`, `api_billing`, `default_profile`, `port`); **store**
+  `harness`, `model`, `api_billing`, `sandbox`, `allowed_domains`,
+  `default_profile`, `port`); **store**
   `~/.local/state/taskmoor/` (session journals, the API token). XDG
   variables move them; `TASKMOOR_HOME` holds both.
 - **The agent's rules.** Every command, edit and fetch comes to the service
@@ -136,14 +137,55 @@ taskmoor release PRJ-007                # through the service: stops the session
   worktree (temporary directories excepted) and deletions outside it wait in
   the inbox; everything else is allowed. The checks of a shell command are
   best effort: they read the command, not what it runs.
-- **What stage 1 does not confine.** The agent runs as you, with your
-  files, keychain and network: a program it is allowed to run (a build, a
-  test, a script in the repository) can do anything you can, including
-  publishing with credentials stored on disk, or reading the service's API
-  token and answering its own question. Release tokens in the environment
-  (`NPM_TOKEN`, `GH_TOKEN`, …) are removed from the agent's environment; a
-  real boundary — Claude's sandbox for the agents — comes in stage 2b
-  (`docs/conveyor.md`, C13).
+- **The sandbox (stage 2b).** A Claude profile runs the agent's commands in
+  Claude's sandbox (Seatbelt on macOS; checked on macOS only) unless it
+  sets `sandbox = false`. It needs Claude Code 2.1.330 or newer; an older
+  one is refused at Run.
+  - writes only to the worktree, the git objects, the worktree's own git
+    directory and the task branch's ref, temporary directories and build
+    caches; every other existing branch (`main` among them), the main
+    checkout's `HEAD` and index, `hooks`, `config`, `info` and taskmoor's
+    `tasks/` are read-only (a new branch can still be created);
+  - no reads of taskmoor's store (the API token) and configuration, or of
+    `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.netrc`, `~/.npmrc`,
+    `~/.docker`, `~/.kube`, `~/.git-credentials`, `~/.claude.json` and the
+    keychains;
+  - network only to the profile's `allowed_domains` (default: the Go, npm,
+    PyPI and crates registries and GitHub for reading); other hosts are
+    refused, not asked;
+  - no way out of it (`allowUnsandboxedCommands = false`), and no session
+    when the sandbox cannot start. Bash still asks the host for every
+    command. The sandbox confines commands; Claude's own file tools are
+    held by the host's rules above and by deny rules for taskmoor's files
+    and the credentials (also in recursive Grep and Glob);
+  - only taskmoor's Claude settings: your settings, the repository's
+    `.claude/` settings, their hooks, plugins and MCP servers are not
+    loaded (they would run or reach outside the sandbox). The project's
+    `CLAUDE.md` and `.claude/rules/` may not load either: the assignment
+    tells the agent to read them, and a task's own instructions belong in
+    its file;
+  - managed Claude settings that turn the sandbox off refuse a confined
+    Run; a repository on git's reftable backend is refused too (the
+    branch rules work on loose refs).
+
+  Known limits: branches created after a session started are not
+  protected from it; a rebase that changes tracked `.claude/` files fails
+  inside the sandbox (run it yourself in the worktree); checked on macOS
+  only.
+
+  A sandbox refusal (an old Claude, managed settings, the ref backend)
+  comes before anything is created. If a confined session fails after it
+  started, the task stays claimed with its worktree and branch:
+  `taskmoor release ID` frees the claim; keep or commit what the worktree
+  holds, then `git worktree remove` it and delete the branch before a new
+  Run. **Continue in terminal** hands the conversation to your own
+  `claude`, with your settings and without taskmoor's sandbox or rules.
+
+  A session with `sandbox = false`, or a harness without a sandbox, is
+  shown as **unconfined** on the board and in `taskmoor sessions`: it runs
+  as you, with your files, keychain and network. Release tokens in the
+  environment (`NPM_TOKEN`, `GH_TOKEN`, …) are removed from every agent's
+  environment.
 - **Billing.** API-key variables are removed from the agent's environment,
   a Claude settings file with `apiKeyHelper` refuses the run, and a session
   whose `init` does not say `apiKeySource: none` is stopped, unless the
