@@ -20,7 +20,7 @@ import (
 // runner's reading goroutine, one at a time.
 type claudeHost interface {
 	// bind gives the host its runner before any other call.
-	bind(r *claudeRunner)
+	bind(r agentRunner)
 	initialized(apiKeySource, model, permissionMode string)
 	activity(a Activity)
 	// permission is a can_use_tool request; the host answers it with

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -30,6 +31,10 @@ type Service struct {
 
 	// Opener runs the command that shows a worktree (Finder, an editor).
 	Opener func(argv []string) error
+	// CodexLogin reports Codex's sign-in (`codex login status`).
+	CodexLogin func() (string, error)
+
+	keep keeper
 
 	journal *journal
 	bus     *bus
@@ -55,7 +60,7 @@ type Service struct {
 // runs, its runner.
 type live struct {
 	s        *Session
-	runner   *claudeRunner
+	runner   agentRunner
 	starting bool // a launch is under way: no second one
 	// handingOver: a handover to the terminal is under way: no launch
 	handingOver bool
@@ -69,6 +74,8 @@ type live struct {
 	stopping bool
 	// stmu orders a session's state changes and their state-file writes.
 	stmu sync.Mutex
+	// sayMu orders a Say's check-and-send against a Restart taking over.
+	sayMu sync.Mutex
 }
 
 // Ask is a question or an approval waiting for the person.
@@ -99,6 +106,11 @@ type Question struct {
 	MultiSelect bool     `json:"multi_select,omitempty"`
 	// Recommended is the index of the recommended option, -1 for none.
 	Recommended int `json:"recommended"`
+	// FreeText: no options, the answer is typed; Optional: it may stay
+	// empty; Secret: the answer is not journalled (ACP forms).
+	FreeText bool `json:"free_text,omitempty"`
+	Optional bool `json:"optional,omitempty"`
+	Secret   bool `json:"secret,omitempty"`
 }
 
 // Option is one choice; Label is shown without "(Recommended)".
@@ -164,7 +176,8 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 		lock.Close()
 		return nil, err
 	}
-	s := &Service{Paths: paths, Version: version, Now: time.Now, Env: env, Home: home, lock: lock, Opener: runDetached,
+	s := &Service{Paths: paths, Version: version, Now: time.Now, Env: env, Home: home, lock: lock, Opener: runDetached, CodexLogin: codexLoginStatus,
+		keep:    keeper{failed: map[string]time.Time{}, errs: map[string]string{}},
 		journal: j, bus: newBus(), sessions: map[string]*live{}, asks: map[string]*Ask{}, owners: map[string]*os.File{}}
 	s.auth = newWebAuth(func() time.Time { return s.Now() }, filepath.Join(paths.Store, "web-sessions.json"))
 	old, err := j.sessions()
@@ -192,6 +205,13 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 			if rec.HandoverPending { // the claim already let go: only the record is left
 				s.finishHandover(l)
 			}
+			if rec.RestartOf != "" && rec.State == StateStale {
+				// a Restart a crash cut off before the claim moved to it
+				rec.State = StateStopped
+				rec.Abandoned = true
+				_ = j.saveSession(rec)
+				_, _ = j.append(rec.ID, Activity{At: stamp(s.Now()), Type: ActError, Text: "the restart did not finish: the claim stayed with " + rec.RestartOf})
+			}
 			continue
 		}
 		if rec.HandoverPending || rec.State == StateHandedOver {
@@ -208,6 +228,21 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 				f.Lifecycle = state.Review
 				f.Harness = &state.Harness{Name: rec.Harness, Status: "done", ObservedAt: stamp(s.Now()), Session: rec.ID}
 			})
+		}
+	}
+	// a predecessor whose successor took the claim but was not marked (a
+	// crash between the writes) is marked now; one whose successor never
+	// got the claim is the task's session again
+	for _, l := range s.sessions {
+		if p := s.sessions[l.s.RestartOf]; p != nil && l.app != nil {
+			switch {
+			case s.ownsClaim(l) && p.s.RestartedAs != l.s.ID:
+				p.s.RestartedAs, p.s.State = l.s.ID, StateStopped
+				_ = j.saveSession(p.s)
+			case l.s.Abandoned && p.s.RestartedAs == l.s.ID:
+				p.s.RestartedAs = ""
+				_ = j.saveSession(p.s)
+			}
 		}
 	}
 	return s, nil
@@ -300,6 +335,9 @@ type RunRequest struct {
 	Task    string `json:"task"`
 	Profile string `json:"profile,omitempty"`
 	Person  bool   `json:"person,omitempty"`
+	// auto: a "Keep N busy" start, admitted only while the project's N
+	// has room (checked again just before the claim)
+	auto bool
 }
 
 // Run creates the task's worktree and branch, records the session, claims
@@ -369,8 +407,11 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*Session, error) {
 		return nil, err
 	}
 	rec := &Session{ID: id, Project: p.Name, Task: t.ID, Title: t.Title, Profile: prof.Name, Harness: prof.Harness,
-		Model: prof.Model, Worktree: wt, Branch: branch, State: StatePending, StartedAt: now, UpdatedAt: now,
-		Resume: fmt.Sprintf("cd %s && claude --resume %s", shellQuote(wt), id), ProjectPath: p.Path, Confined: prof.Confined()}
+		Model: taskModel(t, prof), Worktree: wt, Branch: branch, State: StatePending, StartedAt: now, UpdatedAt: now,
+		ProjectPath: p.Path, Confined: prof.Confined(), Isolation: prof.Isolation()}
+	if prof.Harness == "claude" {
+		rec.Resume = fmt.Sprintf("cd %s && claude --resume %s", shellQuote(wt), id)
+	}
 	l := &live{s: rec, app: a, profile: *prof, pending: map[string]string{}, stateDir: rep.Snapshot.StateDir,
 		rules: Rules{Worktree: wt, MainBranch: rep.MainBranch, MainCheckout: root, Protected: s.protected()}}
 	plan, err := s.sandboxFor(l) // refused here, nothing is claimed yet
@@ -379,6 +420,17 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*Session, error) {
 			err = fmt.Errorf("%w (%s)", err, kept)
 		}
 		return nil, err
+	}
+	if req.auto {
+		now, err := s.Config()
+		cur := (*Project)(nil)
+		if err == nil {
+			cur = now.ProjectByName(p.Name)
+		}
+		if cur == nil || cur.KeepBusy <= 0 || s.busy(p.Name, p.Path) >= cur.KeepBusy {
+			_ = undoWorktree(repo, wt, branch, base)
+			return nil, refusedf("keep busy for %s has no room any more", p.Name)
+		}
 	}
 	// the launch is reserved before anything is published, so Release and
 	// Shutdown see it from the start
@@ -447,7 +499,10 @@ func undoWorktree(repo gitx.Repo, wt, branch, base string) string {
 // (A30), for the directory Claude starts in.
 func (s *Service) preflight(prof Profile, dir string) error {
 	if !runnable[prof.Harness] {
-		return refusedf("profile %s runs %s; this stage of taskmoor serve runs only claude profiles", prof.Name, prof.Harness)
+		return refusedf("profile %s runs %s, which taskmoor serve does not run", prof.Name, prof.Harness)
+	}
+	if prof.Harness != "claude" {
+		return s.preflightACP(prof)
 	}
 	prog := prof.Command
 	if prog == "" {
@@ -472,6 +527,75 @@ func (s *Service) preflight(prof Profile, dir string) error {
 		}
 	}
 	return nil
+}
+
+// preflightACP checks an ACP profile: its command, and its billing (A17,
+// A27).
+func (s *Service) preflightACP(prof Profile) error {
+	argv := prof.acpArgv()
+	if _, err := exec.LookPath(argv[0]); err != nil {
+		return refusedf("%s is not on the service's PATH (profile %s)", argv[0], prof.Name)
+	}
+	switch prof.Harness {
+	case "codex":
+		if prof.APIBilling {
+			return nil
+		}
+		// a ChatGPT sign-in bills the subscription only with Codex's own
+		// provider: a configured one is API billing (A17)
+		if p := codexProvider(s.Home, envValue(s.Env, "CODEX_HOME")); p != "" && p != "openai" {
+			return refusedf("Codex's configuration selects model_provider %q, which bills an API key; allow API billing in profile %s", p, prof.Name)
+		}
+		out, err := s.CodexLogin()
+		if err != nil || !strings.Contains(out, "ChatGPT") {
+			return refusedf("Codex is not signed in with ChatGPT (`codex login status`: %s); run `codex login`, or allow API billing in profile %s",
+				strings.TrimSpace(firstLine(out+" "+errText(err), 200)), prof.Name)
+		}
+	case "opencode":
+		if !prof.APIBilling {
+			return refusedf("opencode bills an API key here (A27): set api_billing = true in profile %s to run it", prof.Name)
+		}
+	}
+	return nil
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func codexLoginStatus() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "codex", "login", "status").CombinedOutput()
+	return string(out), err
+}
+
+// agentSession records an ACP agent's session id once it opened, and the
+// command that continues it in a terminal.
+func (s *Service) agentSession(l *live, id string) {
+	s.mu.Lock()
+	l.s.AgentSession = id
+	s.mu.Unlock()
+	s.saveAndPublish(l)
+}
+
+// agentPrompted: the first prompt is out, so the agent's own resume finds
+// the conversation (Codex writes it then); Continue in terminal can give
+// the command from here on.
+func (s *Service) agentPrompted(l *live) {
+	s.mu.Lock()
+	id := l.s.AgentSession
+	switch l.s.Harness {
+	case "codex":
+		l.s.Resume = fmt.Sprintf("cd %s && codex resume %s", shellQuote(l.s.Worktree), id)
+	case "opencode":
+		l.s.Resume = fmt.Sprintf("cd %s && opencode --session %s", shellQuote(l.s.Worktree), id)
+	}
+	s.mu.Unlock()
+	s.saveAndPublish(l)
 }
 
 func (s *Service) isClosing() bool {
@@ -550,13 +674,23 @@ func (s *Service) unreserve(l *live) {
 // launch starts the runner of a reserved session and sends its first
 // message; the reservation ends either way.
 func (s *Service) launch(l *live, resume bool, first string, plan *sandboxPlan) error {
-	prog, err := programPath(l.profile)
-	if err != nil {
+	var prog string
+	var err error
+	if l.profile.Harness == "claude" {
+		if prog, err = programPath(l.profile); err != nil {
+			s.unreserve(l)
+			return err
+		}
+	} else if resume && l.s.AgentSession == "" {
 		s.unreserve(l)
-		return err
+		return refusedf("session %s has no %s session to resume (it never opened one)", l.s.ID, l.profile.Harness)
 	}
 	s.mu.Lock()
 	l.s.Confined = plan != nil // saved with the pending state below
+	l.s.Isolation = l.profile.Isolation()
+	if plan == nil && l.s.Isolation == "sandbox" {
+		l.s.Isolation = ""
+	}
 	s.mu.Unlock()
 	if resume {
 		// a fresh state for this run, written before it starts, so a stop
@@ -576,9 +710,36 @@ func (s *Service) launch(l *live, resume bool, first string, plan *sandboxPlan) 
 	}
 	h := &sessionHost{s: s, l: l}
 	s.runners.Add(1)
-	_, err = startClaude(claudeStart{Program: prog, Dir: l.s.Worktree, SessionID: l.s.ID, Resume: resume,
-		Model: l.profile.Model, APIBilling: l.profile.APIBilling, Env: s.Env, Sandbox: plan, Protected: s.protected(),
-		SettingsFile: filepath.Join(s.Paths.Store, "sessions", l.s.ID+".settings.json")}, h)
+	if l.profile.Harness == "claude" {
+		_, err = startClaude(claudeStart{Program: prog, Dir: l.s.Worktree, SessionID: l.s.ID, Resume: resume,
+			Model: l.s.Model, APIBilling: l.profile.APIBilling, Env: s.Env, Sandbox: plan, Protected: s.protected(),
+			SettingsFile: filepath.Join(s.Paths.Store, "sessions", l.s.ID+".settings.json")}, h)
+	} else {
+		agent := ""
+		if resume {
+			agent = l.s.AgentSession
+		}
+		var extra []string
+		if l.profile.Harness == "opencode" {
+			// an empty configuration of its own: the person's opencode
+			// config (MCP servers, plugins, permissions) is not the agent's;
+			// the sign-in lives in the data directory and stays. Without it,
+			// no session.
+			dir := filepath.Join(s.Paths.Store, "opencode-config")
+			if err = os.MkdirAll(filepath.Join(dir, "opencode"), 0o700); err == nil {
+				extra = append(extra, "XDG_CONFIG_HOME="+dir)
+			} else {
+				err = fmt.Errorf("opencode's own configuration directory: %w", err)
+			}
+		}
+		if err == nil {
+			_, err = startACP(acpStart{Harness: l.profile.Harness, Argv: l.profile.acpArgv(), Dir: l.s.Worktree, Resume: agent,
+				Model: l.s.Model, APIBilling: l.profile.APIBilling, Env: s.Env, Extra: extra,
+				OnSession:      func(id string) { s.agentSession(l, id) },
+				OnPrompted:     func() { s.agentPrompted(l) },
+				OnModelRefused: func() { s.mu.Lock(); l.s.Model = ""; s.mu.Unlock(); s.saveAndPublish(l) }}, h)
+		}
+	}
 	s.unreserve(l)
 	if err != nil {
 		s.runners.Done()
@@ -626,17 +787,32 @@ func (s *Service) Say(ctx context.Context, id, text string) error {
 	if err != nil {
 		return err
 	}
+	l.sayMu.Lock()
 	s.mu.Lock()
 	r := l.runner
+	moving := l.handingOver || l.s.RestartedAs != ""
 	s.mu.Unlock()
+	if moving {
+		l.sayMu.Unlock()
+		return refusedf("session %s is being restarted or handed over; say it to the session that follows", l.s.ID)
+	}
 	if r != nil && !r.inputClosed() {
-		s.addActivity(l, Activity{Type: ActPrompt, Text: text, By: "person"})
-		return r.send(text)
+		err := r.send(text)
+		l.sayMu.Unlock()
+		if err == nil {
+			s.addActivity(l, Activity{Type: ActPrompt, Text: text, By: "person"})
+			return nil
+		} else if !errors.Is(err, errACPClosed) {
+			return err
+		}
+		// the conversation ended meanwhile: resume it below
+	} else {
+		l.sayMu.Unlock()
 	}
 	if r != nil {
 		// the conversation ended and its process is on its way out
 		select {
-		case <-r.done:
+		case <-r.finished():
 		case <-time.After(15 * time.Second):
 			return refusedf("session %s is still ending; try again", l.s.ID)
 		}
@@ -705,7 +881,7 @@ func (s *Service) Release(ctx context.Context, id string) (string, error) {
 	s.mu.Unlock()
 	if r != nil {
 		r.stop(5 * time.Second)
-		<-r.done
+		<-r.finished()
 	}
 	if err := s.attach(l); err != nil {
 		return "", err
@@ -765,7 +941,7 @@ func (s *Service) AnswerAsk(id string, ans Answer) error {
 	if a != nil {
 		l = s.sessions[a.Session]
 	}
-	r := (*claudeRunner)(nil)
+	var r agentRunner
 	if l != nil {
 		r = l.runner
 	}
@@ -801,6 +977,12 @@ func (s *Service) AnswerAsk(id string, ans Answer) error {
 			}
 		}
 	}
+	if c, ok := r.(answerChecker); ok && a.Kind == "question" {
+		input, _, _ := answerInput(a, ans)
+		if err := c.check(a.requestID, input); err != nil {
+			return refusedf("%v", err)
+		}
+	}
 	if !s.take(a) {
 		return &NotFound{Msg: fmt.Sprintf("ask %s was already answered or withdrawn", id)}
 	}
@@ -829,11 +1011,12 @@ func (s *Service) lookup(id, project string) (*live, error) {
 	if l := s.sessions[id]; l != nil {
 		return l, nil
 	}
-	// a task id names its latest session
+	// a task id names its latest session; one a Restart replaced is not
+	// it, whatever the clock says
 	var best *live
 	projects := map[string]bool{}
 	for _, l := range s.sessions {
-		if l.s.Task != id || (project != "" && l.s.Project != project) {
+		if l.s.Task != id || (project != "" && l.s.Project != project) || l.s.RestartedAs != "" || l.s.Abandoned {
 			continue
 		}
 		projects[l.s.Project] = true
@@ -901,6 +1084,7 @@ type ProfileView struct {
 	APIBilling bool   `json:"api_billing,omitempty"`
 	Runnable   bool   `json:"runnable"`
 	Confined   bool   `json:"confined"`
+	Isolation  string `json:"isolation"`
 }
 
 // ProjectState is a registered project with its tasks.
@@ -909,6 +1093,9 @@ type ProjectState struct {
 	Path  string         `json:"path"`
 	Error string         `json:"error,omitempty"`
 	Tasks []app.TaskView `json:"tasks"`
+	// KeepBusy is the project's "Keep N busy"; KeepError its last failure.
+	KeepBusy  int    `json:"keep_busy"`
+	KeepError string `json:"keep_error,omitempty"`
 	// Routes is the profile Run would choose per task id (C10), or the
 	// reason there is none.
 	Routes map[string]Route `json:"routes"`
@@ -917,7 +1104,9 @@ type ProjectState struct {
 // Route is the routed profile of a task.
 type Route struct {
 	Profile string `json:"profile,omitempty"`
-	Error   string `json:"error,omitempty"`
+	// TaskModel is the task's own model, which wins over any profile's.
+	TaskModel string `json:"task_model,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // Snapshot reads every project now and the sessions and asks held.
@@ -931,10 +1120,11 @@ func (s *Service) Snapshot(ctx context.Context) (*Snapshot, error) {
 	}
 	out := &Snapshot{Epoch: epoch, Rev: rev, Profiles: []ProfileView{}, Projects: []ProjectState{}, Sessions: []Session{}, Asks: []Ask{}}
 	for _, p := range cfg.Profiles {
-		out.Profiles = append(out.Profiles, ProfileView{Name: p.Name, Harness: p.Harness, Model: p.Model, APIBilling: p.APIBilling, Runnable: runnable[p.Harness], Confined: p.Confined()})
+		out.Profiles = append(out.Profiles, ProfileView{Name: p.Name, Harness: p.Harness, Model: p.Model, APIBilling: p.APIBilling, Runnable: runnable[p.Harness], Confined: p.Confined(), Isolation: p.Isolation()})
 	}
 	for _, p := range cfg.Projects {
-		ps := ProjectState{Name: p.Name, Path: p.Path, Tasks: []app.TaskView{}, Routes: map[string]Route{}}
+		ps := ProjectState{Name: p.Name, Path: p.Path, Tasks: []app.TaskView{}, Routes: map[string]Route{},
+			KeepBusy: p.KeepBusy, KeepError: s.keepErrorOf(p.Name)}
 		if rep, err := s.appFor(p).Report(ctx); err != nil {
 			ps.Error = err.Error()
 		} else {
@@ -946,7 +1136,7 @@ func (s *Service) Snapshot(ctx context.Context) (*Snapshot, error) {
 				if prof, err := chooseProfile(cfg, rep.Snapshot.Config, t, ""); err != nil {
 					ps.Routes[t.ID] = Route{Error: err.Error()}
 				} else {
-					ps.Routes[t.ID] = Route{Profile: prof.Name}
+					ps.Routes[t.ID] = Route{Profile: prof.Name, TaskModel: t.Task.Model}
 				}
 			}
 		}
@@ -975,7 +1165,7 @@ func (s *Service) Shutdown() {
 	s.mu.Unlock()
 	s.launches.Wait() // every admitted launch has bound its runner or failed
 	s.mu.Lock()
-	var rs []*claudeRunner
+	var rs []agentRunner
 	for _, l := range s.sessions {
 		if l.runner != nil {
 			l.stopping = true

@@ -59,6 +59,16 @@ type Session struct {
 	Resume string `json:"resume"`
 	// Confined: the agent's commands run in Claude's sandbox (C13).
 	Confined bool `json:"confined"`
+	// Isolation: "sandbox", "codex" (Codex's workspace-write) or "".
+	Isolation string `json:"isolation"`
+	// AgentSession is an ACP agent's own session id (Codex's thread,
+	// OpenCode's session), for resuming and the terminal; Claude's is ID.
+	AgentSession string `json:"agent_session,omitempty"`
+	// RestartOf / RestartedAs link the sessions of a Restart (A24).
+	RestartOf   string `json:"restart_of,omitempty"`
+	RestartedAs string `json:"restarted_as,omitempty"`
+	// Abandoned: a Restart's successor that never got the claim.
+	Abandoned bool `json:"abandoned,omitempty"`
 	// ProjectPath is the registered repository the session belongs to: a
 	// project name reused for another repository does not inherit it.
 	ProjectPath string `json:"project_path,omitempty"`

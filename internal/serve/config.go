@@ -63,6 +63,9 @@ type Config struct {
 type Project struct {
 	Name string `toml:"name"`
 	Path string `toml:"path"`
+	// KeepBusy is "Keep N busy" (A4): the sessions the service keeps
+	// under way for the project; 0 is off.
+	KeepBusy int `toml:"keep_busy,omitempty"`
 }
 
 // Profile is an agent profile.
@@ -72,9 +75,13 @@ type Profile struct {
 	Model   string `toml:"model,omitempty"`
 	// APIBilling allows a session of this profile to bill an API key.
 	APIBilling bool `toml:"api_billing,omitempty"`
-	// Command overrides the harness program (default: the harness name on
-	// PATH), e.g. a wrapper or a test double.
+	// Command overrides the harness program (default: claude; codex:
+	// `npx -y` CodexACP; opencode: `opencode acp`), e.g. a wrapper, a
+	// globally installed codex-acp or a test double.
 	Command string `toml:"command,omitempty"`
+	// Args are the command's arguments (an ACP agent's; opencode's default
+	// is "acp").
+	Args []string `toml:"args,omitempty"`
 	// Sandbox confines the agent's commands (C13); on unless set to false.
 	Sandbox *bool `toml:"sandbox,omitempty"`
 	// AllowedDomains are the hosts the agent's commands may reach (default
@@ -88,10 +95,40 @@ func (p Profile) Confined() bool {
 	return p.Harness == "claude" && (p.Sandbox == nil || *p.Sandbox)
 }
 
+// Isolation names what confines the agent's commands: "sandbox" (Claude's,
+// C13), "codex" (Codex's workspace-write sandbox: writes in the worktree,
+// no network, reads not confined) or "" (unconfined).
+func (p Profile) Isolation() string {
+	switch {
+	case p.Confined():
+		return "sandbox"
+	case p.Harness == "codex":
+		return "codex"
+	}
+	return ""
+}
+
+// acpArgv is an ACP profile's command line.
+func (p Profile) acpArgv() []string {
+	switch {
+	case p.Command != "":
+		args := p.Args
+		if args == nil && p.Harness == "opencode" {
+			args = []string{"acp"}
+		}
+		return append([]string{p.Command}, args...)
+	case p.Harness == "codex":
+		return []string{"npx", "-y", CodexACP}
+	case p.Harness == "opencode":
+		return []string{"opencode", "acp"}
+	}
+	return nil
+}
+
 var nameRe = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
 // Harnesses the service can run in this stage.
-var runnable = map[string]bool{"claude": true}
+var runnable = map[string]bool{"claude": true, "codex": true, "opencode": true}
 
 // LoadConfig reads config.toml; a missing file is an empty configuration
 // with one default profile, `claude`.

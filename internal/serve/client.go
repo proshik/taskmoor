@@ -184,6 +184,27 @@ func (c *Client) Handover(ctx context.Context, id string) (*Session, string, err
 	return out.Session, out.Resume, err
 }
 
+// Restart restarts a session with another profile (A24); the new session
+// is returned, also when its start failed (err says why).
+func (c *Client) Restart(ctx context.Context, id, profile string) (*Session, error) {
+	var out struct {
+		Session *Session `json:"session"`
+		Error   string   `json:"error"`
+	}
+	if err := c.do(ctx, http.MethodPost, c.sessionPath(id, "restart"), map[string]any{"profile": profile}, &out); err != nil {
+		return nil, err
+	}
+	if out.Error != "" {
+		return out.Session, errors.New(out.Error)
+	}
+	return out.Session, nil
+}
+
+// Keep sets a project's "Keep N busy" (A4).
+func (c *Client) Keep(ctx context.Context, project string, n int) error {
+	return c.do(ctx, http.MethodPost, "/api/projects/"+url.PathEscape(project)+"/keep", map[string]any{"n": n}, nil)
+}
+
 // LoginURL asks for a one-time sign-in link for the browser.
 func (c *Client) LoginURL(ctx context.Context) (string, error) {
 	var out struct {

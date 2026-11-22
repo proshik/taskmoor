@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-22; stages 1, 2 and 2b are implemented.**
+2026-11-23; stages 1, 2, 2b and 3 are implemented.**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -945,6 +945,131 @@ The smallest loop that runs a real agent on a real task.
   the choice shown and changeable at Run, **Restart with a profile** (A24).
 - **Keep N busy** (priority then id, re-derived after every claim, never
   `needs_person`, A4).
+
+#### Stage 3 — implementation decisions (2026-11-23)
+
+1. **One runner interface.** Claude's stream-json runner and the ACP
+   runner sit behind one interface (send, allow/deny, stop, close); the
+   host callbacks, the rules, the inbox, the journal and the board are
+   shared. One ACP agent process per session; a session's turn that ends
+   closes its input, and Say resumes in a new process, as for Claude.
+2. **ACP client.** Protocol version 1 over stdio; the client advertises
+   `elicitation.form` and no file system or terminal. A prompt at a time:
+   an instruction during a turn is queued and sent after it. Resume uses
+   `session/resume` when the agent offers it, else `session/load` (its
+   replayed history is not journalled again). The agent's own session id
+   is kept as `agent_session`; taskmoor's session id stays the claim's.
+3. **Codex** through `npx -y @agentclientprotocol/codex-acp@2.9.0` (the
+   person's choice: a pinned version in npm's cache, nothing installed
+   globally; `command` names another). `CODEX_CONFIG` enables
+   `default_mode_request_user_input` (A26; the Plan-mode fallback is not
+   needed: the real check asked in Default mode), `INITIAL_AGENT_MODE =
+   workspace-write`, authentication `chat-gpt` (A17). Preflight requires
+   `codex login status` to say ChatGPT unless the profile allows API
+   billing.
+4. **OpenCode** through `opencode acp`; A27: a profile must set
+   `api_billing = true`, its sessions show the API badge. A28 through
+   `OPENCODE_CONFIG_CONTENT` (`bash`, `external_directory`, `webfetch`:
+   ask; edits in the worktree allowed), `OPENCODE_DISABLE_PROJECT_CONFIG`,
+   and an empty `XDG_CONFIG_HOME` of the store's (the person's global
+   opencode config loaded their MCP servers
+   into the first real session; the sign-in lives in the data directory
+   and stays).
+5. **Permissions and questions.** An ACP permission request is mapped to
+   the rules' tools (execute → Bash with a `zsh -lc` wrapper read through,
+   edit → Edit, read → Read, fetch → WebFetch, others asked) and answered
+   with the agent's allow_once / reject_once option. A form becomes the
+   inbox's question: `oneOf` options, the `(Recommended)` label or the
+   field's `default` marks the recommended one, codex-acp's note field is
+   left to the free-text answer, the answer goes back as the option's
+   constant.
+6. **Isolation** is recorded per session: `sandbox` (Claude's, 2b),
+   `codex` (Codex's workspace-write: writes and network confined, reads
+   not), or none; the board and `taskmoor sessions` show it.
+7. **Routing (A16)** as written; the `validate` warning reads the
+   service's profiles when its configuration exists.
+8. **Restart with a profile (A24):** the old session stops and is
+   recorded as stopped with `restarted_as`; a new session (`restart_of`)
+   of the chosen profile starts in the same worktree with the assignment
+   plus a note to read `git log` and `git status` first; the state file's
+   harness record (name, session) moves to it under the claim.
+9. **Keep N busy (A4):** `keep_busy` per project in the service's
+   configuration (0–32); the watcher's tick fills free slots one task at
+   a time, re-deriving readiness after every claim; sessions pending,
+   working or waiting for the person count as busy; `needs_person` is
+   never started; a failed start is skipped for 10 minutes and shown on
+   the board.
+10. **Real checks** (this Mac, 2026-11-23): Codex (codex-cli 0.171.0,
+    ChatGPT): a form question in Default mode with the recommended option
+    first, answered in the CLI and on the board, a file written and
+    committed on the task branch, a resume through `session/load`, a
+    Restart from an OpenCode session to Codex that moved the harness
+    record. OpenCode (2.2.5): the session opened, but OpenCode Console
+    reported "SignedOut: Reconnect OpenCode Console" and the turn hung
+    retrying; stopped from the CLI. The OpenCode question and approval
+    path is checked only against the fake agent until the person signs in
+    again.
+11. **Review r1 (20 findings, all confirmed), fixed:** an ACP request the
+    rules cannot judge (Codex's extra sandbox permissions, a network
+    destination, any other kind) always goes to the person; a change of
+    several files is judged on every path (renames included); a command
+    is judged in its working directory (`cd <cwd> &&`); inherited
+    `CODEX_CONFIG`, `MODEL_PROVIDER`, `OPENCODE_CONFIG*` are stripped, and
+    a Codex `model_provider` other than OpenAI needs API billing; a failed
+    opencode configuration directory refuses the launch; the agent's
+    output is a pipe of the service's own with `WaitDelay`, so a helper
+    holding it cannot hold Stop or shutdown; every ACP setup call has a
+    deadline (3 min for the first, which covers npx); Say during a Restart
+    or a handover is refused, Say after the last turn ended resumes
+    instead of being lost; Continue in terminal waits for the agent's
+    session; a task id never names a session a Restart replaced, and a
+    successor a crash left without the claim is recorded as stopped;
+    "Keep N busy" reads the target again before every start; form fields
+    of one title stay apart, typed fields (number, integer, boolean) are
+    encoded and checked before the ask is taken, optional and free-text
+    fields are answerable, secret-marked answers are not journalled;
+    Codex's asynchronous questions interrupt the turn and the answer is
+    the next prompt (A26); a task's `model` wins over the profile's, and
+    a model the agent refuses is shown as its default. Recorded, not
+    fixed: OpenCode's sign-in is not checked before Run; a manual Run can
+    take a project one past its N.
+12. **Real check after r1:** a new Codex task (AC-003) through question,
+    answer and commit on the task branch.
+13. **Review r2 (25 findings, the last round), fixed:** Codex's
+    command-scoped `additionalPermissions` make the request the person's;
+    a rename's destination comes from the tool call's diff, a move
+    without it is asked; a command whose working directory (raw, relative
+    or as a location) is outside the worktree is asked instead of being
+    prefixed with `cd`; fetches are asked (A28); inherited
+    `OPENCODE_CONFIG_PROJECT_DISABLE` is stripped and set; Say and Restart
+    are ordered by a per-session lock; Restart checks the successor
+    (profile, preflight) before stopping the session, marks the
+    predecessor before moving the claim, and Open repairs either half of
+    an interrupted Restart (an abandoned successor is never the task's
+    session); an asynchronous question holds the conversation however the
+    turn ends, its answer goes before queued instructions; an automatic
+    start is admitted only while "Keep N busy" still has room, checked
+    just before the claim; non-finite numbers and values outside a
+    field's bounds are refused, required fields must be answered and one
+    text cannot answer several questions, all before the ask is taken;
+    Codex's own-answer field is a question of its own; secret answers are
+    masked in everything the agent says or titles; a model-setup timeout
+    ends the session; a turn's completion is recorded before the exit;
+    Continue in terminal for Codex and OpenCode waits for the first
+    prompt (the agent's own resume needs it); the board survives an
+    option-less field; the Run choice shows a task's own model; with API
+    billing allowed and a key present, Codex authenticates by key and the
+    badge says so; Stop is tested with a helper holding the agent's
+    output. Recorded, not fixed: a turn has no deadline once it runs (long
+    work is normal); within the worktree a relative output path is read
+    against its root.
+14. **Real check after r2:** a Codex task (AC-004): its form now has the
+    own-answer field as an optional second question, which `taskmoor
+    answer ID 2` first refused (fixed: trailing optional questions may be
+    left out); after a service restart, Say resumed the thread, Codex asked
+    again, the answer ("hello") was written and committed on the task
+    branch, and Continue in terminal gave a `codex resume` id whose
+    rollout exists in `~/.codex/sessions`.
 
 ### Stage 4 — the dispatcher
 

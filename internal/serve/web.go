@@ -296,6 +296,10 @@ func (s *Service) Handover(ctx context.Context, id string) (string, error) {
 		s.mu.Unlock()
 		return "", refusedf("session %s is starting or being handed over; try again in a moment", l.s.ID)
 	}
+	if l.s.Resume == "" {
+		s.mu.Unlock()
+		return "", refusedf("session %s has no conversation to continue yet (its agent has not opened one)", l.s.ID)
+	}
 	l.handingOver = true
 	r := l.runner
 	l.stopping = true
@@ -307,7 +311,7 @@ func (s *Service) Handover(ctx context.Context, id string) (string, error) {
 	}()
 	if r != nil {
 		r.stop(5 * time.Second)
-		<-r.done
+		<-r.finished()
 	}
 	if err := s.attach(l); err != nil {
 		return "", err

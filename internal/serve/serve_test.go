@@ -73,12 +73,29 @@ func freePort(t *testing.T) int {
 // start runs a service over repo with the fake claude playing scenario.
 func start(t *testing.T, repo *testrepo.Repo, scenario string, extraEnv ...string) *rig {
 	t.Helper()
+	return startWith(t, repo, scenario, nil, nil, extraEnv...)
+}
+
+// startWith is start with the configuration and the service adjusted.
+func startWith(t *testing.T, repo *testrepo.Repo, scenario string, mod func(*serve.Config), configure func(*serve.Service), extraEnv ...string) *rig {
+	t.Helper()
 	home := t.TempDir()
+	// no test reaches a real agent: Codex is never signed in unless a test
+	// says so, and codexy's command does not exist
+	stubbed := func(s *serve.Service) {
+		s.CodexLogin = func() (string, error) { return "Not logged in", fmt.Errorf("stub") }
+		if configure != nil {
+			configure(s)
+		}
+	}
 	rg := &rig{t: t, repo: repo, home: home, paths: serve.Paths{Config: filepath.Join(home, "config.toml"), Store: filepath.Join(home, "store")},
-		log: filepath.Join(home, "fake.log")}
+		log: filepath.Join(home, "fake.log"), configure: stubbed}
 	cfg := &serve.Config{Port: freePort(t), DefaultProfile: "fake",
-		Profiles: []serve.Profile{{Name: "fake", Harness: "claude", Command: fake(t)}, {Name: "codexy", Harness: "codex"}},
+		Profiles: []serve.Profile{{Name: "fake", Harness: "claude", Command: fake(t)}, {Name: "codexy", Harness: "codex", Command: "/nonexistent/codex-acp"}},
 		Projects: []serve.Project{{Name: "repo", Path: repo.Dir}}}
+	if mod != nil {
+		mod(cfg)
+	}
 	if err := cfg.Save(rg.paths.Config); err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +489,7 @@ func TestRunRefusals(t *testing.T) {
 		{serve.RunRequest{Project: "repo", Task: "TM-002"}, "not ready: dependency TM-001 is backlog"},
 		{serve.RunRequest{Project: "repo", Task: "TM-003"}, "needs a person"},
 		{serve.RunRequest{Project: "repo", Task: "TM-004"}, `profile "nope"`},
-		{serve.RunRequest{Project: "repo", Task: "TM-001", Profile: "codexy"}, "runs only claude profiles"},
+		{serve.RunRequest{Project: "repo", Task: "TM-001", Profile: "codexy"}, "not on the service's PATH"},
 		{serve.RunRequest{Project: "repo", Task: "TM-005"}, "already exists"},
 		{serve.RunRequest{Project: "repo", Task: "TM-404"}, "no such task"},
 		{serve.RunRequest{Project: "elsewhere", Task: "TM-001"}, "no project"},

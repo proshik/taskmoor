@@ -81,16 +81,68 @@ Readers never write: git runs with `GIT_NO_LAZY_FETCH=1` and
 `GIT_OPTIONAL_LOCKS=0`, task files over 1 MiB (64 MiB together) and state
 files over 64 KiB are refused, and only regular files are read.
 
-## The service (conveyor v1, stage 1)
+## The service (conveyor v1, stages 1–3)
 
-`taskmoor serve` runs agent sessions on ready tasks. Stage 1 runs Claude
-(`claude -p` stream-json on the person's subscription) and is driven from
-the CLI; the web, the other harnesses, the dispatcher, review and Telegram
-are the later stages in [`docs/conveyor.md`](docs/conveyor.md).
+`taskmoor serve` runs agent sessions on ready tasks: Claude (`claude -p`
+stream-json on the person's subscription), Codex and OpenCode (over ACP),
+driven from the CLI, the web board and the TUI. The dispatcher, review and
+Telegram are the later stages in [`docs/conveyor.md`](docs/conveyor.md).
 
-Needs [Claude Code](https://code.claude.com) on the service's `PATH`,
-signed in with the subscription (`claude`, then `/login`); a profile whose
-program is missing is refused before anything is created.
+Needs the agent of each profile on the service's `PATH`: [Claude
+Code](https://code.claude.com) signed in with the subscription (`claude`,
+then `/login`); for Codex, `codex` signed in with ChatGPT (`codex login`)
+and `npx` (the bridge `@agentclientprotocol/codex-acp@2.9.0` runs from
+npm's cache; a profile's `command` can name an installed `codex-acp`);
+for OpenCode, `opencode` signed in. A profile whose program is missing, or
+whose sign-in does not fit its billing (Claude, Codex), is refused before
+anything is created. OpenCode's sign-in is not checked up front: a
+signed-out provider shows as a turn that does not move (OpenCode retries);
+stop it and run `opencode auth login`.
+
+```toml
+[[profiles]]
+name = "codex"
+harness = "codex"          # ChatGPT sign-in; model = "…" picks one it offers
+
+[[profiles]]
+name = "opencode"
+harness = "opencode"
+api_billing = true         # required: opencode bills an API key here (A27)
+model = "provider/model"
+```
+
+- **Routing.** A task's `profile` wins; otherwise `[routing]` by kind,
+  `routing.default`, then `default_profile`. A task's `harness` (other
+  than `any`) is a preference: the routed profile if it runs that harness,
+  else the first configured profile that does. `taskmoor validate` warns
+  when `profile` and `harness` disagree.
+- **Restart with a profile.** `taskmoor restart ID --profile NAME` (or the
+  card's "Restart with") stops the session and starts the chosen profile
+  on the same claim, worktree and branch, told to continue from the work
+  there. The old session stays in the history as stopped.
+- **Keep N busy.** `taskmoor keep N` (or "Keep busy" in the board's top
+  bar) has the service start ready tasks, priority then id, with their
+  routed profiles, until N sessions of the project are under way
+  (waiting for you counts); `needs_person` tasks are never started; a task
+  whose start failed is skipped for 10 minutes and the board shows why.
+  `taskmoor keep 0` turns it off; running sessions go on. A manual Run
+  is never held back by it, so it can take the project one past N. An
+  automatic start whose agent fails after the claim (no answer from the
+  agent, a refused sign-in) leaves the task claimed with the session in
+  error and its slot free: Restart it with a profile, or Release it.
+- **Codex and OpenCode sessions.** Questions arrive as forms (Codex asks in
+  its Default mode with `default_mode_request_user_input`); approvals as
+  ACP permission requests, through the same rules as Claude's; what the
+  rules cannot judge (more sandbox access, a network destination, a
+  command outside the worktree, a fetch, a rename without its
+  destination, another kind) always comes to you. Codex runs
+  in its own workspace-write sandbox (writes in the worktree, no network,
+  reads not confined; shown as "codex sandbox"). OpenCode has no sandbox
+  ("unconfined"); its shell commands, edits outside the worktree and
+  fetches are asked, its own and the repository's configuration are not
+  loaded (MCP servers, plugins). Continue in terminal gives `codex resume
+  ID` or `opencode --session ID`. Your Codex configuration (`~/.codex`,
+  hooks, MCP servers, AGENTS.md) applies to Codex sessions.
 
 ```sh
 taskmoor serve                          # in its own terminal tab: 127.0.0.1:7733; ctrl+c stops it

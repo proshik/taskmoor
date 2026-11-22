@@ -6,15 +6,15 @@ import (
 	"sync"
 )
 
-// sessionHost connects one Claude runner to the service. Its callbacks act
+// sessionHost connects one agent runner to the service. Its callbacks act
 // for that runner only: a later runner of the same session has its own.
 type sessionHost struct {
 	s *Service
 	l *live
-	r *claudeRunner
+	r agentRunner
 }
 
-func (h *sessionHost) bind(r *claudeRunner) {
+func (h *sessionHost) bind(r agentRunner) {
 	h.r = r
 	h.s.mu.Lock()
 	h.l.runner = r
@@ -22,7 +22,7 @@ func (h *sessionHost) bind(r *claudeRunner) {
 	h.s.mu.Unlock()
 }
 
-func (h *sessionHost) runner() *claudeRunner { return h.r }
+func (h *sessionHost) runner() agentRunner { return h.r }
 
 func (h *sessionHost) initialized(apiKeySource, model, permissionMode string) {
 	if permissionMode == "bypassPermissions" {
@@ -72,7 +72,17 @@ func (h *sessionHost) permission(requestID, tool string, input map[string]any) {
 		h.s.openAsk(h.l, &Ask{Kind: "question", Questions: qs, Tool: tool, requestID: requestID, input: input})
 		return
 	}
+	if strings.HasPrefix(tool, acpAsk) {
+		// an ACP request the rules cannot judge (more sandbox, a network
+		// destination, another kind): always the person's
+		h.s.openAsk(h.l, &Ask{Kind: "approval", Tool: tool, Detail: detail(tool, input),
+			Reason: "the agent asks for something taskmoor's rules do not judge", requestID: requestID, input: input})
+		return
+	}
 	v := h.l.rules.Decide(tool, input)
+	if paths, ok := input["paths"].([]string); ok && len(paths) > 1 {
+		v = h.l.rules.decideAll(tool, paths) // one decision covers every changed file
+	}
 	switch v.Decision {
 	case Allow:
 		_ = r.allow(requestID, input)
@@ -181,6 +191,9 @@ func detail(tool string, input map[string]any) string {
 	case "Write":
 		return fmt.Sprintf("%s (%d bytes)", str("file_path"), len(str("content")))
 	case "Edit", "MultiEdit":
+		if paths, ok := input["paths"].([]string); ok && len(paths) > 1 {
+			return strings.Join(paths, "\n") // every file the change touches
+		}
 		return str("file_path")
 	case "NotebookEdit":
 		return str("notebook_path")
@@ -199,7 +212,7 @@ func normalizeQuestions(input map[string]any) []Question {
 		if !ok {
 			continue
 		}
-		q := Question{Recommended: -1}
+		q := Question{Recommended: -1, Options: []Option{}}
 		q.Question, _ = m["question"].(string)
 		q.Header, _ = m["header"].(string)
 		q.MultiSelect, _ = m["multiSelect"].(bool)
@@ -220,7 +233,11 @@ func normalizeQuestions(input map[string]any) []Question {
 			}
 			q.Options = append(q.Options, o)
 		}
-		if q.Question != "" && len(q.Options) > 0 {
+		free, _ := m["freeText"].(bool) // an ACP form field without options
+		q.FreeText = free
+		q.Optional, _ = m["optional"].(bool)
+		q.Secret, _ = m["secret"].(bool)
+		if q.Question != "" && (len(q.Options) > 0 || free) {
 			out = append(out, q)
 		}
 	}

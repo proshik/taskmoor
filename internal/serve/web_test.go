@@ -149,7 +149,7 @@ func TestSnapshotRoutesAndProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snap.Profiles) != 2 || !snap.Profiles[0].Runnable || snap.Profiles[1].Runnable {
+	if len(snap.Profiles) != 2 || !snap.Profiles[0].Runnable || !snap.Profiles[1].Runnable || snap.Profiles[1].Isolation != "codex" {
 		t.Fatalf("profiles %+v", snap.Profiles)
 	}
 	r := snap.Projects[0].Routes

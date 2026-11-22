@@ -143,6 +143,77 @@ func (r runner) handoverCmd(ctx context.Context, args []string) int {
 	return ExitOK
 }
 
+// restartCmd is "Restart with a profile" (A24).
+func (r runner) restartCmd(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("restart", flag.ContinueOnError)
+	profile := fs.String("profile", "", "")
+	pos, err := parse(fs, args)
+	if err == nil && (len(pos) != 1 || *profile == "") {
+		err = usagef("restart takes one session or task id and --profile NAME")
+	}
+	if err != nil {
+		return r.usageErr(err)
+	}
+	c, err := r.scopedClient(ctx)
+	if err != nil {
+		return r.fail(err, false)
+	}
+	s, err := c.Restart(ctx, pos[0], *profile)
+	if err != nil && s == nil {
+		return r.serviceFail(err, false)
+	}
+	fmt.Fprintf(r.env.Stdout, "%s restarted: session %s (%s, profile %s) in %s\n", s.Task, s.ID, s.Harness, s.Profile, s.Worktree)
+	if err != nil {
+		fmt.Fprintf(r.env.Stderr, "taskmoor: the new session did not start: %v\n", err)
+		return ExitProblem
+	}
+	return ExitOK
+}
+
+// keepCmd is "Keep N busy" (A4).
+func (r runner) keepCmd(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("keep", flag.ContinueOnError)
+	proj := fs.String("project", "", "")
+	pos, err := parse(fs, args)
+	n := 0
+	if err == nil {
+		if len(pos) != 1 {
+			err = usagef("keep takes the number of sessions to keep busy (0 turns it off)")
+		} else if _, e := fmt.Sscanf(pos[0], "%d", &n); e != nil || fmt.Sprint(n) != pos[0] {
+			err = usagef("keep: %q is not a number", pos[0])
+		}
+	}
+	if err != nil {
+		return r.usageErr(err)
+	}
+	if *proj == "" {
+		p, err := r.paths()
+		if err != nil {
+			return r.fail(err, false)
+		}
+		cfg, err := serve.LoadConfig(p.Config)
+		if err != nil {
+			return r.fail(err, false)
+		}
+		if *proj, err = r.projectFor(ctx, cfg, true); err != nil {
+			return r.usageErr(err)
+		}
+	}
+	c, err := r.client()
+	if err != nil {
+		return r.fail(err, false)
+	}
+	if err := c.Keep(ctx, *proj, n); err != nil {
+		return r.serviceFail(err, false)
+	}
+	if n == 0 {
+		fmt.Fprintf(r.env.Stdout, "%s: keep busy is off; running sessions go on\n", *proj)
+	} else {
+		fmt.Fprintf(r.env.Stdout, "%s: the service keeps %d session(s) busy with ready tasks (priority then id, never needs_person)\n", *proj, n)
+	}
+	return ExitOK
+}
+
 func (r runner) projectCmd(ctx context.Context, args []string) int {
 	if len(args) == 0 {
 		return r.usageErr(usagef("project takes add, list or remove"))
@@ -329,9 +400,12 @@ func (r runner) sessionsCmd(ctx context.Context, args []string) int {
 		if bill == "" {
 			bill = "-"
 		}
-		box := "sandboxed"
-		if !s.Confined {
-			box = "UNCONFINED"
+		box := "UNCONFINED"
+		switch {
+		case s.Confined:
+			box = "sandboxed"
+		case s.Isolation == "codex":
+			box = "codex-sandbox"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.Task, s.State, s.Profile, bill, box, s.StartedAt, s.ID, text.Line(s.Title))
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/proshik/taskmoor/internal/finding"
 	"github.com/proshik/taskmoor/internal/harness"
 	"github.com/proshik/taskmoor/internal/project"
+	"github.com/proshik/taskmoor/internal/serve"
 	"github.com/proshik/taskmoor/internal/state"
 	"github.com/proshik/taskmoor/internal/text"
 	"github.com/proshik/taskmoor/spec"
@@ -67,6 +68,8 @@ The service (taskmoor serve) and its clients:
   taskmoor stop ID                                     stop a session; the claim stays
   taskmoor say ID TEXT…                                an instruction (resumes an ended session)
   taskmoor continue ID                                 hand the session to your terminal (prints the resume command)
+  taskmoor restart ID --profile NAME                   a new session of another profile on the same claim and worktree
+  taskmoor keep N [--project P]                        keep N sessions busy with ready tasks (0: off)
   taskmoor web [--print]                               open the board in the browser (a one-time sign-in link)
 
 --repo and --source work before or after the subcommand. The board, list,
@@ -136,6 +139,10 @@ func Run(ctx context.Context, args []string, env Env) int {
 		return r.webCmd(ctx, rest)
 	case "continue":
 		return r.handoverCmd(ctx, rest)
+	case "restart":
+		return r.restartCmd(ctx, rest)
+	case "keep":
+		return r.keepCmd(ctx, rest)
 	case "version":
 		if len(rest) > 0 {
 			return r.usageErr(usagef("version takes no arguments"))
@@ -525,6 +532,17 @@ func (r runner) validate(ctx context.Context, args []string) int {
 	rep, err := r.app(project.SourceWorktree).Report(ctx)
 	if err != nil {
 		return r.fail(err, *asJSON)
+	}
+	// A16: the service's profiles, when it is configured here
+	if paths, err := serve.DefaultPaths(r.env.Getenv); err == nil {
+		if _, statErr := os.Stat(paths.Config); statErr == nil {
+			if cfg, err := serve.LoadConfig(paths.Config); err == nil {
+				for _, w := range serve.ProfileHarnessWarnings(cfg, rep.Tasks) {
+					file, msg, _ := strings.Cut(w, ": warning: ")
+					rep.Findings = append(rep.Findings, finding.Warnf(file, 0, "%s", msg))
+				}
+			}
+		}
 	}
 	errs, warns := finding.Count(rep.Findings)
 	if *asJSON {

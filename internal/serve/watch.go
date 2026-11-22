@@ -28,6 +28,7 @@ func (s *Service) watch(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+		go s.fill(ctx) // "Keep N busy" (A4)
 		data, _ := os.ReadFile(s.Paths.Config)
 		cfg, err := s.Config()
 		if err != nil {

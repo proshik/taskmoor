@@ -323,3 +323,26 @@ func TestControlCharactersInReasonsAndRefusals(t *testing.T) {
 		t.Errorf("JSON keeps the data: %s", js.stdout)
 	}
 }
+
+// A16: validate warns when a task's profile runs another harness than the
+// one the task names (the profiles come from the service's configuration).
+func TestValidateWarnsOnProfileAndHarness(t *testing.T) {
+	r := testrepo.New(t)
+	r.AddTasks(testrepo.Task{ID: "TM-001", Harness: "codex", Extra: "profile: main\n"})
+	home := t.TempDir()
+	_ = os.WriteFile(filepath.Join(home, "config.toml"), []byte("[[profiles]]\nname = \"main\"\nharness = \"claude\"\n"), 0o600)
+	var out, errb bytes.Buffer
+	code := cli.Run(context.Background(), []string{"validate"}, cli.Env{
+		Stdout: &out, Stderr: &errb, Dir: r.Dir, Version: "0.1.0-test",
+		Getenv: func(k string) string {
+			if k == "TASKMOOR_HOME" {
+				return home
+			}
+			return ""
+		},
+		Now: func() time.Time { return time.Date(2026, 11, 22, 9, 30, 0, 0, time.UTC) },
+	})
+	if code != 0 || !strings.Contains(out.String(), "profile main runs claude, harness says codex") || !strings.Contains(out.String(), "1 warning") {
+		t.Fatalf("%d %s %s", code, out.String(), errb.String())
+	}
+}

@@ -111,6 +111,22 @@ func within(p, d string) bool {
 
 const protectedReason = "taskmoor's own files (its store and configuration) are out of an agent's reach"
 
+// decideAll is the strictest verdict over a tool's paths: a deny if any is
+// denied, else the person's if any asks.
+func (r Rules) decideAll(tool string, paths []string) Verdict {
+	out := Verdict{Allow, ""}
+	for _, p := range paths {
+		v := r.Decide(tool, map[string]any{"file_path": p})
+		switch {
+		case v.Decision == Deny:
+			return v
+		case v.Decision == AskPerson && out.Decision == Allow:
+			out = v
+		}
+	}
+	return out
+}
+
 // Decide checks one tool call. AskUserQuestion never comes here: it is a
 // question, always the person's in this stage.
 func (r Rules) Decide(tool string, input map[string]any) Verdict {

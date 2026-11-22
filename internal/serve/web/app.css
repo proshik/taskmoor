@@ -24,6 +24,10 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-
 .brand { font-weight: 700; }
 .facts { color: var(--dim); }
 .grow { flex: 1; }
+.keep { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); }
+.keep .err { margin: 0; }
+input.num { width: 4em; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+.inline { display: inline-flex; gap: 6px; align-items: center; }
 .inbox-btn b { display: inline-block; min-width: 1.4em; text-align: center; border-radius: 9px; padding: 0 5px; background: var(--line); }
 .inbox-btn.has b { background: var(--warn); color: #000; }
 .conn { color: var(--good); }

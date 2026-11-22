@@ -133,6 +133,8 @@ func (s *Service) Handler(token string, port int) http.Handler {
 	mux.HandleFunc("POST /api/asks/{id}/answer", s.hAnswer)
 	mux.HandleFunc("POST /api/sessions/{id}/open", s.hOpen)
 	mux.HandleFunc("POST /api/sessions/{id}/handover", s.hHandover)
+	mux.HandleFunc("POST /api/sessions/{id}/restart", s.hRestart)
+	mux.HandleFunc("POST /api/projects/{project}/keep", s.hKeep)
 	mux.HandleFunc("POST /api/login-code", func(w http.ResponseWriter, r *http.Request) {
 		// a sign-in link is for whoever holds the API token (the CLI), not
 		// for a board that is already signed in
@@ -263,6 +265,45 @@ func (s *Service) hStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.snapshotSession(id))
+}
+
+func (s *Service) hRestart(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Profile string `json:"profile"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	id, err := s.SessionID(r.PathValue("id"), r.URL.Query().Get("project"))
+	var out *Session
+	if err == nil {
+		out, err = s.Restart(context.WithoutCancel(r.Context()), id, body.Profile)
+	}
+	if err != nil && out == nil {
+		writeErr(w, err)
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"session": out, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"session": out})
+}
+
+func (s *Service) hKeep(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		N int `json:"n"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := s.SetKeepBusy(r.PathValue("project"), body.N); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"project": r.PathValue("project"), "keep_busy": body.N})
 }
 
 func (s *Service) hSay(w http.ResponseWriter, r *http.Request) {

@@ -126,6 +126,7 @@ function latestSessions(project) {
   for (const s of S.snap.sessions) {
     // a session of the same name's earlier repository is not this project's
     if (s.project !== project || (s.project_path && p && s.project_path !== p.path)) continue;
+    if (s.restarted_as || s.abandoned) continue; // a Restart replaced it: the card is its successor's
     const cur = m.get(s.task);
     if (!cur || s.started_at > cur.started_at || s.started_at === cur.started_at && s.id > cur.id) m.set(s.task, s);
   }
@@ -306,6 +307,7 @@ function render() {
     document.getElementById("inbox-count").textContent = count;
     document.getElementById("inbox-btn").className = "inbox-btn" + (count ? " has" : "");
     renderBoard();
+    renderKeep(currentProject());
     renderPanel();
   });
 }
@@ -341,7 +343,7 @@ function card(project, t, sess, col) {
   if (sess && (col === "running" || col === "needs" || col === "review" || !ENDED.has(sess.state))) {
     meta.push(h("span", { class: "st-" + sess.state }, "● " + stateWord(sess.state)));
     if (sess.billing) meta.push(billingChip(sess.billing));
-    if (!sess.confined) meta.push(h("span", { class: "chip api", title: "the agent's commands run without the sandbox" }, "unconfined"));
+    if (!sess.confined) meta.push(isolationChip(sess.isolation));
   } else if (t.harness) {
     meta.push(h("span", { class: "st-" + t.harness.status }, "● " + t.harness.status));
   }
@@ -463,7 +465,7 @@ function runForm(p, t) {
   const select = draft(h("select", { "aria-label": "Profile" },
     h("option", { value: "", selected: !route.profile, disabled: true }, "Choose a profile…"),
     S.snap.profiles.map(pr => h("option", { value: pr.name, selected: pr.name === route.profile, disabled: !pr.runnable },
-      pr.name + " (" + pr.harness + (pr.model ? ", " + pr.model : "") + (pr.api_billing ? ", API key" : "") + (pr.confined ? "" : ", unconfined") + ")" + (pr.runnable ? "" : " — later stage")))), key + ":profile");
+      pr.name + " (" + pr.harness + ((route.task_model || pr.model) ? ", " + (route.task_model || pr.model) : "") + (pr.api_billing ? ", API key" : "") + (pr.confined ? "" : pr.isolation === "codex" ? ", codex sandbox" : ", unconfined") + ")" + (pr.runnable ? "" : " — not runnable")))), key + ":profile");
   const person = t.needs_person ? draft(h("input", { type: "checkbox" }), key + ":person") : null;
   const err = h("div", { class: "err" });
   const run = h("button", { class: "primary", type: "button", disabled: !select.value, onclick: async () => {
@@ -504,8 +506,9 @@ function sessionView(sess) {
       h("dt", {}, "profile"), h("dd", {}, sess.profile + (sess.model ? " · " + sess.model : "")),
       h("dt", {}, "billing"), h("dd", {}, sess.billing ? billingChip(sess.billing) : "—"),
       h("dt", {}, "sandbox"), h("dd", {}, sess.state === "handedOver"
-        ? "taskmoor's last run: " + (sess.confined ? "on" : "off") + "; in the terminal, your own Claude settings apply"
+        ? "taskmoor's last run: " + (sess.confined ? "on" : sess.isolation === "codex" ? "Codex's" : "off") + "; in the terminal, your own agent settings apply"
         : sess.confined ? "on: files, network and credentials confined"
+        : sess.isolation === "codex" ? "Codex's: writes in the worktree, no network; reads are not confined"
         : h("span", { class: "chip api" }, "off — the agent's commands run as you")),
       h("dt", {}, "worktree"), h("dd", { class: "mono" }, sess.worktree),
       h("dt", {}, "resume"), h("dd", { class: "mono" }, sess.resume)),
@@ -519,6 +522,7 @@ function sessionView(sess) {
         await copy(r.resume); banner("Copied: " + r.resume + " — then `taskmoor review " + sess.task + "` when done.");
       }) : null,
       running ? act("Stop", () => api("POST", `/api/sessions/${sid}/stop`, {}), "danger") : null,
+      mine ? restartControl(sess, act) : null,
       mine ? act("Release", async () => {
         if (!confirmStep("Release " + sess.task + "? The session stops and the claim goes; the worktree and branch stay.")) return;
         await api("POST", `/api/sessions/${sid}/release`, {});
@@ -537,6 +541,42 @@ function sessionView(sess) {
     err,
     h("h3", {}, "Feed"),
     h("ul", { class: "feed", id: "feed", "data-session": sess.id })];
+}
+
+// isolationChip marks a session whose commands are not in Claude's sandbox.
+function isolationChip(iso) {
+  return iso === "codex"
+    ? h("span", { class: "chip", title: "Codex's sandbox: writes in the worktree, no network; reads are not confined" }, "codex sandbox")
+    : h("span", { class: "chip api", title: "the agent's commands run without a sandbox" }, "unconfined");
+}
+
+// restartControl is "Restart with a profile" (A24): the same claim,
+// worktree and branch, a new session of the chosen profile.
+function restartControl(sess, act) {
+  const key = "restart:" + sess.id;
+  const sel = draft(h("select", { "aria-label": "Restart with profile" },
+    S.snap.profiles.filter(p => p.runnable).map(p => h("option", { value: p.name, selected: p.name === sess.profile },
+      p.name + " (" + p.harness + (p.model ? ", " + p.model : "") + ")"))), key);
+  return h("span", { class: "inline" }, sel, act("Restart with", async () => {
+    if (!confirmStep("Stop this session and start " + sel.value + " on " + sess.task + " in the same worktree? Its work stays.")) return;
+    const r = await api("POST", `/api/sessions/${encodeURIComponent(sess.id)}/restart`, { profile: sel.value });
+    forget(key);
+    if (r.error) throw new Error(r.error);
+  }));
+}
+
+// renderKeep is the project's "Keep N busy" (A4) in the top bar.
+function renderKeep(p) {
+  const box = document.getElementById("keep");
+  if (!p) { box.replaceChildren(); return; }
+  const key = "keep:" + p.name;
+  const n = draft(h("input", { type: "number", min: "0", max: "32", value: String(p.keep_busy || 0), "aria-label": "Sessions to keep busy", class: "num" }), key);
+  const err = h("span", { class: "err" }, p.keep_error || "");
+  box.replaceChildren(h("label", { title: "The service starts ready tasks (priority then id, never needs_person) until this many sessions are under way" }, "Keep busy ", n), " ",
+    h("button", { type: "button", onclick: async () => {
+      try { await api("POST", `/api/projects/${encodeURIComponent(p.name)}/keep`, { n: Number(n.value) }); forget(key); await refresh(); }
+      catch (e) { err.textContent = e.message; }
+    } }, "Set"), " ", err);
 }
 
 // confirmStep is a plain confirmation the person gives in the page.
@@ -590,10 +630,16 @@ function askForm(a) {
       err);
   }
   const groups = a.questions.map((q, qi) => {
+    q.options = q.options || [];
     // the recommended option first (F9)
     const order = q.options.map((o, i) => i);
     if (q.recommended >= 0) { order.splice(order.indexOf(q.recommended), 1); order.unshift(q.recommended); }
     const name = `q-${a.id}-${qi}`;
+    if (q.free_text) { // a typed answer of its own (ACP forms)
+      return h("fieldset", { class: "plain" },
+        h("div", { class: "q" }, (q.header ? "[" + q.header + "] " : "") + q.question),
+        draft(h("input", { type: q.secret ? "password" : "text", name, "data-free": "1", placeholder: q.optional ? "optional" : "your answer" }), `ask:${a.id}:${qi}:text`));
+    }
     return h("fieldset", { class: "plain" },
       h("div", { class: "q" }, (q.header ? "[" + q.header + "] " : "") + q.question),
       order.map(i => {
@@ -609,9 +655,10 @@ function askForm(a) {
     h("div", { class: "actions" }, other,
       h("button", { class: "primary", type: "button", onclick: () => {
         if (other.value.trim()) return send({ text: other.value.trim() });
-        const choices = a.questions.map((q, qi) =>
-          [...form.querySelectorAll(`input[name="q-${a.id}-${qi}"]:checked`)].map(i => i.value));
-        if (choices.some(c => !c.length)) { err.textContent = "Pick an option for every question."; return; }
+        const choices = a.questions.map((q, qi) => q.free_text
+          ? [form.querySelector(`input[name="q-${a.id}-${qi}"]`).value].filter(v => v.trim())
+          : [...form.querySelectorAll(`input[name="q-${a.id}-${qi}"]:checked`)].map(i => i.value));
+        if (choices.some((c, qi) => !c.length && !a.questions[qi].optional)) { err.textContent = "Answer every question that is not optional."; return; }
         return send({ choices });
       } }, "Answer")),
     err);
