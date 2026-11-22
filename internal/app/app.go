@@ -22,6 +22,12 @@ type App struct {
 	Harness harness.Source // nil outside Guild
 	Now     func() time.Time
 	Version string
+	// WriterName is the program named in state files' writer field;
+	// "taskmoor" when empty ("taskmoor serve" for the service).
+	WriterName string
+	// CheckOwner makes review and release refuse a task a live
+	// `taskmoor serve` owns (A6); the CLI sets it, the service does not.
+	CheckOwner bool
 
 	loader project.Loader
 }
@@ -76,6 +82,11 @@ func (a *App) now() time.Time {
 		return a.Now()
 	}
 	return time.Now()
+}
+
+// LoadSnapshot reads the project without deriving anything.
+func (a *App) LoadSnapshot(ctx context.Context) (*project.Snapshot, error) {
+	return a.loader.Load(ctx, a.Dir, a.Source)
 }
 
 // Load reads the project and derives statuses, without harness status.

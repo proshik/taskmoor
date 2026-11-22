@@ -81,6 +81,62 @@ Readers never write: git runs with `GIT_NO_LAZY_FETCH=1` and
 `GIT_OPTIONAL_LOCKS=0`, task files over 1 MiB (64 MiB together) and state
 files over 64 KiB are refused, and only regular files are read.
 
+## The service (conveyor v1, stage 1)
+
+`taskmoor serve` runs agent sessions on ready tasks. Stage 1 runs Claude
+(`claude -p` stream-json on the person's subscription) and is driven from
+the CLI; the web, the other harnesses, the dispatcher, review and Telegram
+are the later stages in [`docs/conveyor.md`](docs/conveyor.md).
+
+Needs [Claude Code](https://code.claude.com) on the service's `PATH`,
+signed in with the subscription (`claude`, then `/login`); a profile whose
+program is missing is refused before anything is created.
+
+```sh
+taskmoor serve &                        # 127.0.0.1:7733, foreground; ctrl+c stops it
+taskmoor project add ~/work/some-project
+cd ~/work/some-project
+taskmoor ready
+taskmoor run PRJ-007                    # worktree ../some-project-prj-007, branch task/PRJ-007-<slug>, claim, start Claude
+taskmoor feed PRJ-007 --follow          # what the agent does (a task id is looked up in this directory's project)
+taskmoor inbox                          # its questions and approvals
+taskmoor answer <ask> 1                 # pick an option (* marks the recommended one)
+taskmoor say PRJ-007 "also update the README"
+taskmoor stop PRJ-007                   # the claim, worktree and branch stay
+taskmoor release PRJ-007                # through the service: stops the session, removes the state file
+```
+
+- **Config** `~/.config/taskmoor/config.toml` (projects, profiles with
+  `harness`, `model`, `api_billing`, `default_profile`, `port`); **store**
+  `~/.local/state/taskmoor/` (session journals, the API token). XDG
+  variables move them; `TASKMOOR_HOME` holds both.
+- **The agent's rules.** Every command, edit and fetch comes to the service
+  (ask rules beat the allow rules of your Claude settings), in Claude's
+  default permission mode. Push, publish, deploy (also `kubectl`, `helm`,
+  `terraform` changes), switching to the main branch and git writes in the
+  main checkout are refused without asking (also as Claude deny rules).
+  Reads of secret files wait in the inbox. File-tool
+  writes outside the worktree, secret files, dependency manifests, and in
+  commands, output redirections and copy/move/mkdir/… targets outside the
+  worktree (temporary directories excepted) and deletions outside it wait in
+  the inbox; everything else is allowed. The checks of a shell command are
+  best effort: they read the command, not what it runs.
+- **What stage 1 does not confine.** The agent runs as you, with your
+  files, keychain and network: a program it is allowed to run (a build, a
+  test, a script in the repository) can do anything you can, including
+  publishing with credentials stored on disk, or reading the service's API
+  token and answering its own question. Release tokens in the environment
+  (`NPM_TOKEN`, `GH_TOKEN`, …) are removed from the agent's environment; a
+  real boundary — Claude's sandbox for the agents — comes in stage 2b
+  (`docs/conveyor.md`, C13).
+- **Billing.** API-key variables are removed from the agent's environment,
+  a Claude settings file with `apiKeyHelper` refuses the run, and a session
+  whose `init` does not say `apiKeySource: none` is stopped, unless the
+  profile sets `api_billing = true`.
+- When the agent finishes, the task moves to `review`. While a service
+  owns a task (a lock in the project's state directory), the CLI's `review`
+  refuses it and `release` goes through that service.
+
 ## Layout
 
 ```
@@ -98,6 +154,7 @@ internal/finding     the finding type
 internal/text        control characters out of printed text
 internal/cli         subcommands, output, exit codes
 internal/tui         the Bubble Tea board
+internal/serve       taskmoor serve: config, journal, rules, the Claude runner, API, client
 internal/testrepo    real git repositories for tests
 skills/taskmoor/     how an agent uses taskmoor
 docs/                the plan and the conveyor design

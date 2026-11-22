@@ -36,7 +36,64 @@ func (a *App) Writer() string {
 	if v == "" {
 		v = "dev"
 	}
-	return "taskmoor " + v
+	name := a.WriterName
+	if name == "" {
+		name = "taskmoor"
+	}
+	return name + " " + v
+}
+
+// ServiceWriter is the writer name of `taskmoor serve`.
+const ServiceWriter = "taskmoor serve"
+
+// ownedByService refuses a CLI write to a task a live service owns (A6).
+func (a *App) ownedByService(dir string, f *state.File) error {
+	if !a.CheckOwner || f == nil {
+		return nil
+	}
+	if state.OwnerHeld(dir, f.ID) {
+		return refuse("%s is owned by a running taskmoor serve; stop or release it there", f.ID)
+	}
+	return nil
+}
+
+// UpdateState rewrites a task's valid, non-stale state file under the
+// project lock: change edits a copy, which is then validated and published
+// with rename. The writer and updated_at are set here.
+func (a *App) UpdateState(ctx context.Context, id string, change func(*state.File) error) (*state.File, error) {
+	sch, err := schema.Load()
+	if err != nil {
+		return nil, err
+	}
+	snap, statuses, err := a.lockedLoad(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer snap.unlock()
+	e, exists, err := state.Read(snap.StateDir, id, sch)
+	if err != nil {
+		return nil, err
+	}
+	if !exists || !e.Valid() {
+		return nil, refuse("%s has no valid state file", id)
+	}
+	if st := statuses[id]; st != nil && st.Stale {
+		return nil, refuse("%s is %s; its state file is stale", id, st.Lifecycle)
+	}
+	nf := *e.File
+	if nf.Harness != nil {
+		h := *nf.Harness
+		nf.Harness = &h
+	}
+	if err := change(&nf); err != nil {
+		return nil, err
+	}
+	nf.UpdatedAt = state.Now(a.now())
+	nf.Writer = a.Writer()
+	if err := state.Replace(snap.StateDir, &nf, sch); err != nil {
+		return &nf, err
+	}
+	return &nf, nil
 }
 
 // ClaimArgs are `taskmoor claim`'s inputs.
@@ -48,6 +105,10 @@ type ClaimArgs struct {
 	Session  string
 	Person   bool
 	Force    bool
+	// Hold, when set, runs under the project lock right after the state
+	// file is published (the service takes its owner lock there); an error
+	// removes the file again and fails the claim.
+	Hold func(stateDir string) error
 }
 
 // Claim starts a task: it writes the task's state file with lifecycle
@@ -172,13 +233,24 @@ func (a *App) Claim(ctx context.Context, args ClaimArgs) (*state.File, error) {
 	if args.Harness != "" {
 		f.Harness = &state.Harness{Name: args.Harness, Status: "unknown", ObservedAt: now, Session: args.Session}
 	}
+	var created error
 	if err := state.Create(snap.StateDir, f, sch); err != nil {
 		if errors.Is(err, state.ErrExists) {
 			return nil, refuse("%s already has a state file; another writer owns the task", t.ID)
 		}
-		return f, err // a NotDurableError still returns the published file
+		var nd *state.NotDurableError
+		if !errors.As(err, &nd) {
+			return nil, err
+		}
+		created = err // published, durability unknown
 	}
-	return f, nil
+	if args.Hold != nil {
+		if err := args.Hold(snap.StateDir); err != nil {
+			_ = state.Remove(snap.StateDir, t.ID)
+			return nil, err
+		}
+	}
+	return f, created
 }
 
 // Review hands a task over: its state file's lifecycle becomes review.
@@ -207,6 +279,9 @@ func (a *App) Review(ctx context.Context, id string) (f *state.File, changed boo
 	if !e.Valid() {
 		return nil, false, refuse("%s's state file is invalid (%s); release it and claim again", id, e.Problem)
 	}
+	if err := a.ownedByService(snap.StateDir, e.File); err != nil {
+		return nil, false, err
+	}
 	if st := statuses[id]; st.Stale {
 		return nil, false, refuse("%s is %s; its state file is stale (release it)", id, st.Lifecycle)
 	}
@@ -223,6 +298,36 @@ func (a *App) Review(ctx context.Context, id string) (f *state.File, changed boo
 	return &nf, true, nil
 }
 
+// ReleaseIf is Release for a writer that owns a claim: the state file is
+// removed only if keep says it is still that writer's, checked under the
+// project lock.
+func (a *App) ReleaseIf(ctx context.Context, id string, keep func(*state.File) bool) (string, error) {
+	snap, statuses, err := a.lockedLoad(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer snap.unlock()
+	sch, err := schema.Load()
+	if err != nil {
+		return "", err
+	}
+	e, exists, err := state.Read(snap.StateDir, id, sch)
+	if err != nil {
+		return "", err
+	}
+	if !exists || !e.Valid() || !keep(e.File) {
+		return "", refuse("%s's state file is not this session's", id)
+	}
+	after := derive.Backlog
+	if st := statuses[id]; st != nil && (st.Stale || !derive.Running(st.Lifecycle)) {
+		after = st.Lifecycle
+	}
+	if err := state.Remove(snap.StateDir, id); err != nil {
+		return after, err
+	}
+	return after, nil
+}
+
 // Release removes a task's state file: from in_progress or review the task
 // goes back to backlog; for a stale file the lifecycle stays what git or the
 // main branch says. It also removes an invalid file. It returns the
@@ -235,6 +340,15 @@ func (a *App) Release(ctx context.Context, id string) (string, error) {
 	defer snap.unlock()
 	if snap.Task(id) == nil && !project.TaskIDRe.MatchString(id) {
 		return "", refuse("%s: no such task", id)
+	}
+	sch, err := schema.Load()
+	if err != nil {
+		return "", err
+	}
+	if e, exists, err := state.Read(snap.StateDir, id, sch); err == nil && exists && e.File != nil {
+		if err := a.ownedByService(snap.StateDir, e.File); err != nil {
+			return "", err
+		}
 	}
 	after := ""
 	if st := statuses[id]; st != nil {

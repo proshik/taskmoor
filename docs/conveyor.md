@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-22; stage 1 is in progress.**
+2026-11-22; stage 1 is implemented.**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -180,6 +180,12 @@ Answered by the person one by one; not re-opened here.
   the service API (like the web and the TUI). Where this document names a
   Guild action in v1, the standalone replacement in
   [v1 in stages](#v1-in-stages-without-guild) applies.
+- **C13 — confining the agents (2026-11-22).** Stage 1 runs agents as the
+  person, so their subprocesses can use the person's credentials and the
+  service's API token. Decided: confine them with Claude Code's own sandbox
+  (file and network limits for Bash) in the agent profiles, as a separate
+  stage right after stage 2, checked on a real session; a separate macOS
+  user was not chosen.
 - **C11 — scope of the first version (2026-11-22).**
   **v1:** the run loop + Telegram — board (web on localhost + TUI), launching
   ready tasks into worktrees, background agents, the inbox with forms, the
@@ -573,13 +579,14 @@ The smallest loop that runs a real agent on a real task.
   (A23), `claim` it under the lock with `--session` (writer
   `taskmoor serve <version>`, A6), start the runner with the task body as
   the assignment. A `needs_person` task needs `--person` (A4).
-- **Claude runner** only (C2, A15, A30): `claude -p --input-format
+- **Claude runner** only (C2, A30): `claude -p --input-format
   stream-json --output-format stream-json --verbose --session-id <uuid>
-  --permission-prompt-tool stdio`, settings with a `PreToolUse` hook (a
-  `taskmoor hook` subcommand) that defers `AskUserQuestion`; API-key
-  variables stripped; refuses a profile whose Claude settings set
-  `apiKeyHelper`; stops the session if `system/init.apiKeySource` is not
-  `none`.
+  --permission-prompt-tool stdio`; the service is the permission host, and
+  `AskUserQuestion` arrives as a `can_use_tool` request answered with
+  `updatedInput.answers` (implementation decision 1 below, in place of
+  A15's hook); API-key variables stripped; refuses a profile whose Claude
+  settings set `apiKeyHelper` or an API key; stops the session if
+  `system/init.apiKeySource` is not `none`.
 - **Permissions without the dispatcher.** The fixed rules of A13 only:
   push/publish/deploy and merges into main are rejected without asking
   (A11); deletions outside the worktree, secret paths and dependency
@@ -601,6 +608,119 @@ The smallest loop that runs a real agent on a real task.
   real check runs one short subscription session on a throwaway repository,
   with the person's permission at that time.
 
+#### Stage 1 — implementation decisions (2026-11-22)
+
+1. **Questions are answered through the permission host, not by
+   `defer` + `--resume` (changes A15 for stage 1).** `AskUserQuestion`
+   comes to the host as a `can_use_tool` control request (as every tool
+   that needs permission does) and is answered with `allow` and
+   `updatedInput.answers` while the process waits. Fewer moving parts (no
+   hook command, no resume per answer); the cost is a live process while
+   the person thinks. The defer path stays possible for a later stage.
+2. **One conversation per run.** When a turn ends (`result`) the service
+   closes Claude's input, the session is `complete` and the task moves to
+   `review`. `say` to an ended session resumes it with `claude -p --resume
+   <id>` and sets the task back to `in_progress`; `say` to a running one
+   adds a user message.
+3. **Permission mode and hard stops.** The agent inherits the person's
+   Claude settings and instructions. The runner passes `--permission-mode
+   default` (so a person's auto or bypass default does not skip the host),
+   the A11 commands as `--disallowedTools` deny rules (they win over allow
+   rules), and stops a session whose `init` says `bypassPermissions` (a
+   managed setting). The host's rules (`internal/serve/policy.go`) catch
+   what the prefixes miss.
+4. **The fixed rules only (A13's first step).** Refused: push, publish,
+   deploy, releases, PR merges, `git checkout|switch <main>`. Asked: writes
+   outside the worktree, secret paths, dependency manifests, deletions
+   outside the worktree, commands naming the main checkout. Allowed:
+   everything else. The dispatcher's judgement is stage 4.
+5. **States and the harness record.** Added `stopped` (the person's Stop):
+   the claim, worktree and branch stay (A7), the harness record says
+   `exited`. A service restart makes running sessions `stale`; `say`
+   resumes them.
+6. **A refused claim undoes the run's worktree and branch**, which were
+   made a moment before and hold nothing; the service never removes
+   anything else (A7).
+7. **Profiles.** `--profile` → the task's `profile` → `routing.<kind>` →
+   `routing.default` → `default_profile` (C10's order) already in stage 1;
+   a non-Claude profile is refused until stage 3.
+8. **Paths and API.** XDG config and store, `TASKMOOR_HOME` for both; one
+   service per store (`flock` on `serve.lock`); `127.0.0.1` only, a random
+   token (mode 0600) on every request and a loopback `Host` check; events
+   are server-sent with `(epoch, rev)`; a client that missed events takes a
+   new snapshot (no replay).
+9. **The agent's environment** drops API-key variables (unless
+   `api_billing`) and the variables of a Claude Code session the service
+   may have been started from (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, its
+   IDE port and messaging socket), keeping settings-like `CLAUDE_CODE_*`.
+10. **A6 in the CLI.** While a service owns a task (it holds an owner lock
+    in the project's state directory), `taskmoor review` refuses it and
+    `taskmoor release` hands it back through that service, by the exact
+    session the state file names; the service stops the session and removes
+    the file only if that claim is still the session's. When no service of
+    the CLI's store knows the session, the refusal stands; once the owning
+    service has stopped, `taskmoor release ID` works offline as in phase 0.
+11. **Real check (2026-11-22, Claude Code 2.1.330, model sonnet, the
+    subscription).** On a throwaway repository: Run → the agent asked with
+    `AskUserQuestion`, the recommended option marked → answered from the
+    inbox → it wrote and committed `hello.txt` on the task branch → the task
+    moved to `review`, harness `done`, billing `subscription`. It also showed
+    that the person's auto-mode classifier applies inside the session, which
+    led to decision 3. After the review fixes a second short session
+    (DM-002) checked the hardened flags: `git push` was refused by the deny
+    rule before reaching the host, the other commands came through the
+    host and ran, the work was committed, the task moved to `review`; the
+    restarted service recovered the earlier session.
+12. **Review r1 (revust `codex-only`, 25 findings, all confirmed).** Fixed:
+    every command, edit and fetch is an ask rule (`--settings`), so allow
+    rules in the person's or the project's settings cannot skip the host;
+    the deny list covers all A11 commands; Bash writes outside the worktree
+    are checked (redirections and write commands, best effort); publish
+    tokens and `TASKMOOR_HOME` are removed from the agent's environment;
+    an approval shows the whole command; the store lock is taken before
+    journal recovery; one owner lock per task in the project's state
+    directory makes A6 independent of the CLI's store, and `taskmoor
+    release` goes through the owning service; a session touches the state
+    file only while its claim (`harness.session` and worktree) is still its
+    own; one runner per session at a time, callbacks bound to their runner;
+    Shutdown refuses new launches before draining; stop never waits on a
+    blocked write; an ask is registered, the session marked waiting, and
+    only then announced; the session is recorded before the claim; a refused
+    claim removes the worktree and branch only if untouched; the settings'
+    API-key check runs on the worktree at every launch; init with a wrong
+    billing source or `bypassPermissions` kills the process at once (Claude
+    sends `init` only after the first message, so no probe turn is used);
+    task ids are looked up within the working directory's project and are
+    refused when ambiguous; `feed --follow` handles a reset; `--json` works
+    on every service command.
+    **Review r2 (27 findings, all confirmed), fixed:** the deny rules and
+    the host's classifier cover `kubectl set image` and other cluster
+    changes, with global options before the subcommand; a git write naming
+    the main checkout (a merge into main from there) is refused, not asked;
+    `Read` is an ask rule too (secret files); the person's sandbox cannot
+    auto-approve Bash past the host (`autoAllowBashIfSandboxed: false`);
+    numbered redirections (`2> f`) and Bash writes to manifests and secret
+    files are checked like file-tool writes; release removes the state
+    file only after checking, under the project lock, that the claim is the
+    session's; a launch is reserved before the session is published, and
+    Release and Shutdown wait for or refuse an admitted launch; the owner
+    lock is taken inside the claim's project lock; a runner keeps its slot
+    until its last write, so a resume never starts before the previous
+    process has fully ended; completion writes "done" and `review` in one
+    update, and a restart finishes a handover a crash interrupted; an ask
+    is answerable and visible only once announced; the billing preflight
+    reads `CLAUDE_CONFIG_DIR`, checks the worktree before the claim and a
+    resume before any state change, and reads settings files bounded and
+    regular-only; the feed returns the state before the history; rollback
+    keeps a worktree with untracked or ignored files and deletes the
+    branch only at its original commit (`update-ref -d` with the expected
+    value); the config is saved through a unique temporary file and edited
+    under a lock; `answer --json` reports every failure as JSON.
+    **Not fixed in stage 1:** the agent runs as the person — its
+    subprocesses can use any credential on disk and can read the API token
+    and answer the inbox. The person decided (C13) to confine agents with
+    Claude's sandbox in stage 2b; the README states the limit until then.
+
 ### Stage 2 — web on localhost and the TUI as a client
 
 - The web UI served by `taskmoor serve`: the board with the conveyor's
@@ -614,6 +734,18 @@ The smallest loop that runs a real agent on a real task.
   prints (or `taskmoor web` opens), then a cookie bound to `localhost`.
 - The TUI shows the conveyor's columns when the service runs (A21) and the
   phase-0 board when it does not.
+
+### Stage 2b — the agents in Claude's sandbox (C13)
+
+- Agent profiles run Claude with its sandbox on: Bash writes limited to the
+  worktree (and temporary directories), network limited to what the
+  profile allows, the service's store and the person's credential files out
+  of reach; `autoAllowBashIfSandboxed` stays off, so the host still sees
+  every command.
+- The real check runs one session that tries to read the API token, write
+  outside the worktree and reach a denied host, and shows each refused.
+- The other harnesses (stage 3) get the equivalent of their own, or are
+  marked unconfined in the UI until they do.
 
 ### Stage 3 — Codex and OpenCode, profiles and routing
 

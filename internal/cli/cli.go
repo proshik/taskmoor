@@ -54,6 +54,17 @@ const usage = `usage:
   taskmoor release ID
   taskmoor version
 
+The service (taskmoor serve) and its clients:
+  taskmoor serve                                       run the service (127.0.0.1, foreground)
+  taskmoor project add PATH [--name N] | list | remove NAME
+  taskmoor run ID [--project P] [--profile NAME] [--person] [--json]
+  taskmoor sessions [--json]                           the service's sessions
+  taskmoor feed ID [--follow] [--json]                 a session's feed (ID: session or task)
+  taskmoor inbox [--json]                              questions and approvals waiting for you
+  taskmoor answer ASK N [N…] | --text T | --allow | --deny [--text WHY]
+  taskmoor stop ID                                     stop a session; the claim stays
+  taskmoor say ID TEXT…                                an instruction (resumes an ended session)
+
 --repo and --source work before or after the subcommand. The board, list,
 show, ready and claim read tasks from the main branch; validate reads the
 working tree.
@@ -99,6 +110,24 @@ func Run(ctx context.Context, args []string, env Env) int {
 		return r.review(ctx, rest)
 	case "release":
 		return r.release(ctx, rest)
+	case "serve":
+		return r.serveCmd(ctx, rest)
+	case "project":
+		return r.projectCmd(ctx, rest)
+	case "run":
+		return r.runCmd(ctx, rest)
+	case "sessions":
+		return r.sessionsCmd(ctx, rest)
+	case "feed":
+		return r.feedCmd(ctx, rest)
+	case "inbox":
+		return r.inboxCmd(ctx, rest)
+	case "answer":
+		return r.answerCmd(ctx, rest)
+	case "stop":
+		return r.stopCmd(ctx, rest)
+	case "say":
+		return r.sayCmd(ctx, rest)
 	case "version":
 		if len(rest) > 0 {
 			return r.usageErr(usagef("version takes no arguments"))
@@ -190,7 +219,7 @@ func (r runner) app(def project.Source) *app.App {
 	if h == nil {
 		h = harness.FromEnv(r.env.Getenv)
 	}
-	return &app.App{Dir: dir, Source: src, Harness: h, Now: r.env.Now, Version: r.env.Version}
+	return &app.App{Dir: dir, Source: src, Harness: h, Now: r.env.Now, Version: r.env.Version, CheckOwner: true}
 }
 
 func (r runner) usageErr(err error) int {
@@ -230,6 +259,13 @@ func (r runner) fail(err error, asJSON bool) int {
 		_ = writeJSON(r.env.Stdout, map[string]any{"format": spec.Format, "error": err.Error()})
 	}
 	return code
+}
+
+// writeJSONLine writes one compact JSON object per line (a stream).
+func writeJSONLine(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
 }
 
 func writeJSON(w io.Writer, v any) error {
@@ -572,6 +608,12 @@ func (r runner) release(ctx context.Context, args []string) int {
 		return r.fail(err, false)
 	}
 	after, err := r.app(project.SourceMain).Release(ctx, pos[0])
+	var refused *app.Refused
+	if errors.As(err, &refused) && strings.Contains(refused.Error(), "owned by a running taskmoor serve") {
+		if code, ok := r.releaseViaService(ctx, pos[0]); ok {
+			return code
+		}
+	}
 	if err != nil && !r.notDurable(err) {
 		return r.fail(err, false)
 	}

@@ -384,3 +384,39 @@ func Lock(ctx context.Context, dir string) (unlock func(), err error) {
 		f.Close()
 	}, nil
 }
+
+// ownerPath is the lock a running service holds for each task it owns
+// (A6), in the project's own state directory, so every client sees it
+// whatever service store it is configured with.
+func ownerPath(dir, id string) string { return filepath.Join(dir, ".owner-"+id+".lock") }
+
+// HoldOwner takes the owner lock of a task; it fails at once when another
+// process holds it. Close the file to let go.
+func HoldOwner(dir, id string) (*os.File, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(ownerPath(dir, id), os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("%s is owned by another running taskmoor serve", id)
+	}
+	return f, nil
+}
+
+// OwnerHeld reports whether a live service holds the task's owner lock.
+func OwnerHeld(dir, id string) bool {
+	f, err := os.OpenFile(ownerPath(dir, id), os.O_RDWR|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return true
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return false
+}
