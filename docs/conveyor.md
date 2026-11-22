@@ -9,8 +9,8 @@ Agent decisions A1–A30 (2026-11-22) close the open questions, and the
 the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
-[v1 in stages](#v1-in-stages-without-guild) — proposed, waiting for the
-person's agreement before stage 1 starts.**
+[v1 in stages](#v1-in-stages-without-guild), agreed by the person
+2026-11-22; stage 1 is in progress.**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -535,7 +535,7 @@ session id.
 
 ## v1 in stages, without Guild
 
-Proposed 2026-11-22 (agent proposal under C12, not yet agreed). v1 is too
+Agreed by the person 2026-11-22 (proposed under C12). v1 is too
 big for one merge, so it is built in seven stages; each one ends with
 something the person can run, test on fixtures and check by hand, and each
 is reviewed like phase 0 (revust `codex-only`, at most 2 rounds). The
