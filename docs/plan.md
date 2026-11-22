@@ -3,6 +3,9 @@
 Status: **proposal; decisions D1–D5 answered by the user (2026-11-07), the
 plan as a whole not yet agreed.** The decisions are recorded at the end.
 
+The agent conveyor design in [`conveyor.md`](conveyor.md) extends this
+plan; this plan's MVP is the conveyor's foundation (phase 0).
+
 ## Goal
 
 A CLI with a TUI that shows and drives the tasks a repository keeps as files
@@ -198,6 +201,8 @@ format's seven words and `source` = `guild` | `state` .
 taskmoor **does not write** observed harness status into state files: the
 spec gives that to whoever runs the harness (the launcher / Guild). The only
 harness record taskmoor writes is the initial one at `claim --harness`.
+`taskmoor serve` (the conveyor, [`conveyor.md`](conveyor.md), A1) is a
+launcher and keeps the harness record current for the sessions it runs.
 
 ## State writes
 
@@ -225,6 +230,9 @@ the embedded `state.schema.json`, and write it atomically:
 - `--harness H` adds `harness {name: H, status: unknown, observed_at: now}`
   (and `session: S` with D2); `--session` without `--harness` is a usage error;
 - refuses if a state file exists (another writer owns the task).
+- the readiness re-check and the publish run under a per-project lock,
+  `flock` on `<state>/.lock`, shared with `taskmoor serve` (conveyor A29),
+  so two claims of different ids with overlapping `touches` cannot both win.
 
 `taskmoor review ID` — state must exist with `in_progress` (or already
 `review`: no-op, exit 0); keeps everything, sets `lifecycle: review`,
@@ -438,9 +446,12 @@ authoritative. That edit is Guild's, not this repository's.
 - Launching a harness from the TUI (inside Guild:
   `guild worktree create task/<ID>-<slug> --from-file <task> --harness H`,
   then `claim`) — a `launch` package and a key; designed for, not built.
-- `merge` (adding the `Task:` trailer), release cutting, pruning stale state.
+  Decided by the conveyor: [`conveyor.md`](conveyor.md).
+- `merge` (adding the `Task:` trailer; decided by the conveyor:
+  [`conveyor.md`](conveyor.md)), release cutting, pruning stale state.
 - Carrying OSC 7501 / Guild status into the state file (the launcher's job).
-- Reading a remote main (`origin/main`); several repositories in one board.
+- Reading a remote main (`origin/main`); several repositories in one board
+  (decided by the conveyor: [`conveyor.md`](conveyor.md)).
 - Creating or editing task files from the TUI; a `new` scaffold.
 - fsnotify-based refresh.
 
