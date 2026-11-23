@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-23; stages 1, 2, 2b, 3, 4, 5 and 6 are implemented.**
+2026-11-23; stages 1–7 of v1 are implemented.**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -1379,6 +1379,86 @@ The smallest loop that runs a real agent on a real task.
   deadlines re-notify; dangerous approvals wait for a confirmation on the
   Mac (A9), whose mechanism (Touch ID / password through macOS) this stage
   settles.
+
+#### Stage 7 — implementation decisions (2026-11-23)
+
+1. **Dangerous approvals (A9), the person's choice:** answered on the Mac
+   — the board on 127.0.0.1 and the CLI. Telegram never carries a button
+   for an approval, only the notice and the link. v1 checks no physical
+   presence: whoever holds the board's sign-in (made by `taskmoor web` on
+   the Mac) or the API token can approve, a browser on the person's own
+   ssh forward to that address included — the laptop path A9 describes is
+   not built in v1 and its forward cannot be told apart from the Mac. So
+   A9's Touch ID / password step on the Mac is deferred, by the person's
+   choice, to v2 together with the remote web's passkey (C7, A10).
+2. **The bot's secret:** `taskmoor telegram setup` reads the token from
+   stdin (never an argument; from a terminal without echo), the service
+   checks it with `getMe` and keeps it in `<store>/telegram.json` (0600);
+   the setup endpoint takes only the API token's credential (the CLI), not
+   a browser's. Every request carrying it (the CLI's to the service
+   included) follows no redirect, Telegram's use HTTP/1.1; errors are
+   cleaned of it. Claude sessions cannot read the store (2b); Codex's
+   sandbox leaves reads unconfined and OpenCode has none, so their
+   sessions can read the token, as they can the person's other files
+   (a recorded limit of v1).
+3. **Pairing:** a one-time code (10 minutes, spent on use) sent as
+   `/start CODE` in a private chat binds the person's user id and chat;
+   every update from anyone else, and every other message, is ignored
+   without an answer. The settings are held in memory under one lock with
+   a generation: setup and off replace them, drop the code and cancel the
+   poll in flight, so a batch an older poll brings back answers, pairs
+   and saves nothing.
+4. **Delivery:** long polling (`getUpdates`, 25 s) from the Mac; the
+   next offset comes from the ids returned, and one saved over 6 days ago
+   is dropped (Telegram may restart its ids after a week). The service
+   subscribes to its own event bus and then sends what is already open
+   (again after a gap, and after a pairing); a failed send is tried again
+   a minute later, and a send's error shows in `telegram status` until
+   one succeeds. Whether the dispatcher looks at a question is decided as
+   it opens: if so, it is sent once the dispatcher leaves it to the
+   person ("for you"), and a dispatcher turned off meanwhile leaves it
+   too. Simple questions (A12: one question — codex-acp's own-answer
+   field beside it aside, marked as such by the ACP runner — single
+   choice, at most 8 options, no previews, not secret, and short enough
+   that the question and every choice show in full: 1000 bytes, 250 per
+   choice) get inline buttons, numbered as the full choices
+   in the text, the recommended first with ★; the rest get their
+   questions (a secret one only named) and the board's link, which is
+   never cut off. An approval's message carries nothing of the request (a
+   command can hold a secret): only that one waits, and the link. Option
+   previews are kept and shown on the board. Pressing a button answers
+   through the same path as the board ("answered in Telegram" in the
+   feed), off the poll, at most 4 in flight; a resolved ask edits its
+   message to "✓ answered", also one answered while its message was on
+   the way.
+5. **Reminders (A20):** an ask still open `TelegramRemind` (30 minutes)
+   after its last message is sent again (the older message points to it);
+   an `ask_reminder` event goes to the clients every 30 minutes an ask
+   waits for the person, on its own clock, whether Telegram got it or
+   not. Nothing else changes.
+6. **Review r1** (15 findings, all fixed): poll/setup/off generations;
+   approvals without detail; retries, late pairing and the catch-up order;
+   the dispatcher's disposition fixed at open; previews board-only and on
+   the board; answers off the poll; offsets from the returned ids; full
+   numbered choices; no redirects from the CLI; setup without echo;
+   the Codex/OpenCode read limit recorded; board-only links never cut;
+   status events on setup and off; the reminder test synchronised.
+7. **Review r2** (17 findings, all fixed; the last round): a pairing is a
+   generation of its own, and each generation's context cancels its
+   requests (polls, sends, a callback's answer) and its delivery records
+   start empty, so a new pairing gets what is open at once; a press is
+   taken only if its account is still heard as the ask is claimed
+   (`answerIf`, under the service's lock, then the bot's); the pairing's
+   note and catch-up run off the poll; the offset is kept in memory when
+   its file cannot be written and the failure shows; edits that fail are
+   tried again on the minute's pass, which also closes messages of asks
+   resolved while an event was missed; links use the port listened on;
+   buttons only when every choice fits; only the marked own-answer field
+   is exempt; `telegram setup` reads the token before finding the
+   service and sends it only after the listener proves, by an HMAC of a
+   nonce with the API token, that it is the service; Ctrl+C at the hidden
+   prompt restores the terminal; serve joins the bot's goroutines before
+   it returns; the dispatcher test holds the dispatcher's reply.
 
 ### What each stage needs from the person
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,7 +45,10 @@ func Connect(store string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{base: fmt.Sprintf("http://127.0.0.1:%d", info.Port), token: strings.TrimSpace(string(tok)), http: &http.Client{}}, nil
+	return &Client{base: fmt.Sprintf("http://127.0.0.1:%d", info.Port), token: strings.TrimSpace(string(tok)), http: &http.Client{
+		// the API token (and a bot token on setup) never follows a redirect
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}, nil
 }
 
 // APIError is an error the service returned.
@@ -221,6 +225,59 @@ func (c *Client) Acceptance(ctx context.Context, id string) (*Acceptance, error)
 func (c *Client) Accept(ctx context.Context, id, tip string) (*AcceptResult, error) {
 	var out AcceptResult
 	err := c.do(ctx, http.MethodPost, c.sessionPath(id, "accept"), map[string]any{"tip": tip}, &out)
+	return &out, err
+}
+
+// Verify checks that the listener is this store's service: it proves it
+// holds the API token, which is not sent for it.
+func (c *Client) Verify(ctx context.Context) error {
+	nonce := newID() + newID()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/proof?nonce="+nonce, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Proof string `json:"proof"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&out) != nil ||
+		!hmac.Equal([]byte(out.Proof), []byte(proof(c.token, nonce))) {
+		return errors.New("the listener on the service's port is not this taskmoor serve: nothing was sent to it")
+	}
+	return nil
+}
+
+// TelegramSetup gives the service a bot token (the CLI only), once the
+// listener has proved it is the service.
+func (c *Client) TelegramSetup(ctx context.Context, token string) (*TelegramStatus, error) {
+	if err := c.Verify(ctx); err != nil {
+		return nil, err
+	}
+	var out TelegramStatus
+	err := c.do(ctx, http.MethodPost, "/api/telegram/setup", map[string]string{"token": token}, &out)
+	return &out, err
+}
+
+// TelegramPair asks for a one-time pairing code.
+func (c *Client) TelegramPair(ctx context.Context) (code, bot string, err error) {
+	var out struct{ Code, Bot string }
+	err = c.do(ctx, http.MethodPost, "/api/telegram/pair", map[string]any{}, &out)
+	return out.Code, out.Bot, err
+}
+
+// TelegramOff forgets the bot.
+func (c *Client) TelegramOff(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/api/telegram/off", map[string]any{}, nil)
+}
+
+// TelegramStatus is the bot's state.
+func (c *Client) TelegramStatus(ctx context.Context) (*TelegramStatus, error) {
+	var out TelegramStatus
+	err := c.do(ctx, http.MethodGet, "/api/telegram", nil, &out)
 	return &out, err
 }
 

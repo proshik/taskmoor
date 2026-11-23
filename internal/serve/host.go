@@ -71,6 +71,10 @@ func (h *sessionHost) permission(requestID, tool string, input map[string]any) {
 			return
 		}
 		a := &Ask{Kind: "question", Questions: qs, Tool: tool, requestID: requestID, input: input}
+		if cfg, err := h.s.Config(); err == nil && cfg.DispatcherProfile != "" {
+			// decided as it opens: Telegram holds it for the dispatcher
+			a.Dispatch = "the dispatcher is looking"
+		}
 		h.s.openAsk(h.l, a)
 		go h.s.dispatch(h.l, a) // C3: (a) and (b) without the person
 		return
@@ -102,7 +106,7 @@ func (h *sessionHost) cancelled(requestID string) {
 	aid := h.l.pending[requestID]
 	a := h.s.asks[aid]
 	h.s.mu.Unlock()
-	if a != nil && h.s.take(a) {
+	if a != nil && h.s.take(a, nil) {
 		h.s.resolve(h.l, a, "withdrawn by the agent", "agent")
 	}
 }
@@ -163,7 +167,7 @@ func (h *sessionHost) exited(code int, err error) {
 	}
 	h.s.mu.Unlock()
 	for _, a := range open {
-		if h.s.take(a) {
+		if h.s.take(a, nil) {
 			h.s.resolve(h.l, a, "withdrawn: the session ended", "agent")
 		}
 	}
@@ -230,7 +234,8 @@ func normalizeQuestions(input map[string]any) []Question {
 			}
 			label, _ := om["label"].(string)
 			desc, _ := om["description"].(string)
-			o := Option{Label: label, Description: desc, raw: label}
+			preview, _ := om["preview"].(string)
+			o := Option{Label: label, Description: desc, Preview: preview, raw: label}
 			if l, ok := cutRecommended(label); ok {
 				o.Label = l
 				if q.Recommended < 0 {
@@ -243,6 +248,7 @@ func normalizeQuestions(input map[string]any) []Question {
 		q.FreeText = free
 		q.Optional, _ = m["optional"].(bool)
 		q.Secret, _ = m["secret"].(bool)
+		q.Note, _ = m["note"].(bool)
 		if q.Question != "" && (len(q.Options) > 0 || free) {
 			out = append(out, q)
 		}

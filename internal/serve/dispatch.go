@@ -131,9 +131,16 @@ func (s *Service) dispatch(l *live, a *Ask) {
 	if a.Kind != "question" {
 		return // C3: never an approval
 	}
+	s.mu.Lock()
+	looking := a.Dispatch != ""
+	s.mu.Unlock()
+	if !looking {
+		return // the dispatcher was off when it opened: the person's
+	}
 	cfg, err := s.Config()
 	if err != nil || cfg.DispatcherProfile == "" {
-		return // the dispatcher is off: the person answers everything
+		s.setDispatch(a, "for you: the dispatcher is off")
+		return
 	}
 	d := &Ruling{ID: newID(), At: stamp(s.Now()), Project: a.Project, Task: a.Task, Session: a.Session, Ask: a.ID,
 		Questions: a.Questions, Level: "c"}

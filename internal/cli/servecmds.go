@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/charmbracelet/x/term"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -788,6 +790,81 @@ func (r runner) acceptCmd(ctx context.Context, args []string) int {
 	return ExitOK
 }
 
+// telegramCmd sets the bot up (stage 7): setup reads the token from stdin
+// (never an argument: it would be in the shell's history), pair makes the
+// one-time code, status and off.
+func (r runner) telegramCmd(ctx context.Context, args []string) int {
+	if len(args) != 1 {
+		return r.usageErr(usagef("telegram takes setup, pair, status or off"))
+	}
+	w := r.env.Stdout
+	var line string
+	if args[0] == "setup" {
+		// the token first, then the service is found: the listener is
+		// checked right before the token goes to it
+		fmt.Fprint(r.env.Stderr, "the bot token from @BotFather (it is not shown): ")
+		if in := r.env.Stdin; in == nil && term.IsTerminal(os.Stdin.Fd()) {
+			b, err := readHidden(os.Stdin.Fd())
+			if err != nil {
+				return r.fail(usagef("no token read: %v", err), false)
+			}
+			line = string(b)
+		} else {
+			if in == nil {
+				in = os.Stdin // a pipe or a file
+			}
+			l, err := bufio.NewReader(in).ReadString('\n')
+			if err != nil && l == "" {
+				return r.fail(usagef("no token read"), false)
+			}
+			line = l
+		}
+		fmt.Fprintln(r.env.Stderr)
+	}
+	c, err := r.client()
+	if err != nil {
+		return r.fail(err, false)
+	}
+	switch args[0] {
+	case "setup":
+		st, err := c.TelegramSetup(ctx, strings.TrimSpace(line))
+		if err != nil {
+			return r.serviceFail(err, false)
+		}
+		fmt.Fprintf(w, "bot @%s is set up; pair your account: taskmoor telegram pair\n", st.Bot)
+	case "pair":
+		code, bot, err := c.TelegramPair(ctx)
+		if err != nil {
+			return r.serviceFail(err, false)
+		}
+		fmt.Fprintf(w, "in Telegram, open https://t.me/%s?start=%s and press Start\n(or send @%s: /start %s) within 10 minutes; only that account is heard after\n", bot, code, bot, code)
+	case "status":
+		st, err := c.TelegramStatus(ctx)
+		if err != nil {
+			return r.serviceFail(err, false)
+		}
+		switch {
+		case !st.Configured:
+			fmt.Fprintln(w, "no bot: taskmoor telegram setup")
+		case !st.Paired:
+			fmt.Fprintf(w, "bot @%s, not paired: taskmoor telegram pair\n", st.Bot)
+		default:
+			fmt.Fprintf(w, "bot @%s, paired: questions go to your Telegram\n", st.Bot)
+		}
+		if st.Error != "" {
+			fmt.Fprintf(w, "last error: %s\n", text.Line(st.Error))
+		}
+	case "off":
+		if err := c.TelegramOff(ctx); err != nil {
+			return r.serviceFail(err, false)
+		}
+		fmt.Fprintln(w, "the bot is forgotten (its token removed from the store)")
+	default:
+		return r.usageErr(usagef("telegram takes setup, pair, status or off"))
+	}
+	return ExitOK
+}
+
 // usageCmd shows the plans' usage and the guard (stage 6).
 func (r runner) usageCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("usage", flag.ContinueOnError)
@@ -1006,4 +1083,30 @@ func (r runner) releaseViaService(ctx context.Context, id string) (code int, ok 
 	}
 	fmt.Fprintf(r.env.Stdout, "%s: released through taskmoor serve (session %s stopped); now %s\n", s.Task, s.ID, after)
 	return ExitOK, true
+}
+
+// readHidden reads a line without echo; Ctrl+C puts the terminal back
+// before the process ends.
+func readHidden(fd uintptr) ([]byte, error) {
+	state, err := term.GetState(fd)
+	if err != nil {
+		return nil, err
+	}
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	done := make(chan struct{})
+	defer func() {
+		signal.Stop(sig)
+		close(done)
+	}()
+	go func() {
+		select {
+		case <-sig:
+			_ = term.Restore(fd, state)
+			fmt.Fprintln(os.Stderr)
+			os.Exit(130)
+		case <-done:
+		}
+	}()
+	return term.ReadPassword(fd) // no echo: not in the scrollback
 }

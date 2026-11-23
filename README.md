@@ -130,6 +130,22 @@ model = "provider/model"
   automatic start whose agent fails after the claim (no answer from the
   agent, a refused sign-in) leaves the task claimed with the session in
   error and its slot free: Restart it with a profile, or Release it.
+- **Telegram (stage 7).** Questions and approvals reach your Telegram:
+  create a bot with @BotFather, then `taskmoor telegram setup` (the token
+  is read from stdin, kept in the store with mode 0600, never shown) and
+  `taskmoor telegram pair` (a one-time code, 10 minutes: open the printed
+  `t.me` link and press Start). Only that account is heard; anyone else
+  is ignored. The service polls Telegram (outbound only). A simple
+  question — one, single choice, not secret — comes with option buttons,
+  the recommended one first (★); everything else, and every approval,
+  comes with the link to the board on your Mac, where it is answered
+  (dangerous approvals are answered on the Mac only; their message says
+  only that one waits, nothing of the command). Codex and OpenCode
+  sessions can read the store's files, the bot token included. A question the
+  dispatcher may answer is sent once it is yours. An ask answered
+  anywhere closes its message; one still waiting after 30 minutes is
+  sent again, and nothing is ever answered for you. `taskmoor telegram
+  status` and `off`. Question texts pass through Telegram's servers.
 - **Usage and power (stage 6).** Every 5 minutes the service reads how
   much of each subscription plan is left: Claude's from the OAuth token
   Claude Code keeps in the login Keychain and the undocumented

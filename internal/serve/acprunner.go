@@ -972,7 +972,8 @@ func (r *acpRunner) elicitation(id, params json.RawMessage) {
 		// a secret given earlier and repeated by the agent is not shown, nor
 		// sent on (to the dispatcher)
 		questions = append(questions, map[string]any{"question": r.redact(q), "header": r.redact(header), "options": options,
-			"multiSelect": f.Type == "array", "freeText": len(options) == 0, "optional": order[k] == 0, "secret": fd.secret})
+			"multiSelect": f.Type == "array", "freeText": len(options) == 0, "optional": order[k] == 0, "secret": fd.secret,
+			"note": f.Meta.Codex.Role == "user_note"})
 	}
 	if len(questions) == 0 {
 		_ = r.conn.reply(id, map[string]any{"action": "decline"})

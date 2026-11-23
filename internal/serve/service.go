@@ -46,6 +46,7 @@ type Service struct {
 	UsageClaude UsageReader
 	UsageCodex  UsageReader
 	usage       usageState
+	tg          telegram
 	awake       awake
 	pid         int
 	acceptMu    sync.Mutex // one merge at a time
@@ -139,13 +140,17 @@ type Question struct {
 	FreeText bool `json:"free_text,omitempty"`
 	Optional bool `json:"optional,omitempty"`
 	Secret   bool `json:"secret,omitempty"`
+	// Note: codex-acp's own-answer field beside the choice before it.
+	Note bool `json:"note,omitempty"`
 }
 
 // Option is one choice; Label is shown without "(Recommended)".
 type Option struct {
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`
-	raw         string // the label as the harness sent it
+	// Preview is what the option would look like (Claude's markdown).
+	Preview string `json:"preview,omitempty"`
+	raw     string // the label as the harness sent it
 }
 
 // Answer is the person's reply to an ask.
@@ -210,6 +215,7 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 		reviewSem:   make(chan struct{}, 1),
 		UsageClaude: readClaudeUsage, UsageCodex: readCodexUsage, pid: os.Getpid(),
 		usage:   usageState{last: map[string]Usage{}, pause: map[string]time.Time{}},
+		tg:      newTelegram(),
 		journal: j, bus: newBus(), sessions: map[string]*live{}, asks: map[string]*Ask{}, owners: map[string]*os.File{}}
 	s.auth = newWebAuth(func() time.Time { return s.Now() }, filepath.Join(paths.Store, "web-sessions.json"))
 	old, err := j.sessions()
@@ -1023,6 +1029,11 @@ func (s *Service) AnswerAsk(id string, ans Answer) error { return s.answerAs(id,
 // answerAs answers an ask for the person or the dispatcher; note heads the
 // feed's record of the answer.
 func (s *Service) answerAs(id string, ans Answer, by, note string) error {
+	return s.answerIf(id, ans, by, note, nil)
+}
+
+// answerIf answers if still() holds as the ask is taken (nil: always).
+func (s *Service) answerIf(id string, ans Answer, by, note string, still func() bool) error {
 	s.mu.Lock()
 	a := s.asks[id]
 	var l *live
@@ -1072,7 +1083,7 @@ func (s *Service) answerAs(id string, ans Answer, by, note string) error {
 			return refusedf("%v", err)
 		}
 	}
-	if !s.take(a) {
+	if !s.take(a, still) {
 		return &NotFound{Msg: fmt.Sprintf("ask %s was already answered or withdrawn", id)}
 	}
 	if note != "" {
@@ -1107,10 +1118,10 @@ func (e *deliveryError) Error() string { return e.err.Error() }
 func (e *deliveryError) Unwrap() error { return e.err }
 
 // take removes a pending ask; false when another answer took it first.
-func (s *Service) take(a *Ask) bool {
+func (s *Service) take(a *Ask, still func() bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.asks[a.ID] != a {
+	if s.asks[a.ID] != a || (still != nil && !still()) { // s.mu, then tg.mu: never the other way
 		return false
 	}
 	delete(s.asks, a.ID)
@@ -1196,6 +1207,8 @@ type Snapshot struct {
 	Threshold     int     `json:"threshold"`
 	AgentsRunning bool    `json:"agents_running"`
 	AwakeError    string  `json:"awake_error,omitempty"`
+	// Telegram is the bot's state (stage 7).
+	Telegram *TelegramStatus `json:"telegram"`
 	// Decisions are the dispatcher's latest decisions; Dispatcher names its
 	// profile ("" when it is off).
 	Decisions  []Ruling `json:"decisions"`
@@ -1247,6 +1260,7 @@ func (s *Service) Snapshot(ctx context.Context) (*Snapshot, error) {
 	out := &Snapshot{Epoch: epoch, Rev: rev, Profiles: []ProfileView{}, Projects: []ProjectState{}, Sessions: []Session{}, Asks: []Ask{},
 		Dispatcher: cfg.DispatcherProfile, Usage: s.Usages(), Threshold: s.threshold()}
 	out.AgentsRunning, out.AwakeError = s.AgentsRunning()
+	out.Telegram = s.TelegramStatus()
 	// the 30 latest the dispatcher answered: those the person may override
 	out.Decisions = []Ruling{}
 	if ds, err := s.Decisions(0); err == nil {

@@ -2,6 +2,9 @@ package serve
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -75,7 +78,8 @@ func Serve(ctx context.Context, s *Service, logf func(string, ...any)) error {
 	wctx, stopWatch := context.WithCancel(ctx)
 	defer stopWatch()
 	go s.watch(wctx)
-	go s.pollUsage(wctx) // the plans' usage (stage 6)
+	go s.pollUsage(wctx)        // the plans' usage (stage 6)
+	s.startTelegram(wctx, port) // the bot (stage 7)
 	select {
 	case <-ctx.Done():
 	case err := <-errc:
@@ -84,6 +88,8 @@ func Serve(ctx context.Context, s *Service, logf func(string, ...any)) error {
 	logf("stopping: ending the running sessions (their claims stay)")
 	s.Shutdown()     // refuses new launches first, then stops and waits
 	s.bus.closeAll() // event streams end, so open browsers do not hold the server
+	stopWatch()
+	s.stopTelegram()
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(sctx); err != nil {
@@ -190,6 +196,43 @@ func (s *Service) Handler(token string, port int) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, res)
 	})
+	mux.HandleFunc("GET /api/telegram", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.TelegramStatus())
+	})
+	mux.HandleFunc("POST /api/telegram/setup", func(w http.ResponseWriter, r *http.Request) {
+		if kind, _ := s.authorize(r, token); kind != credAPI { // the CLI only: the token comes from a terminal
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "set the bot up with taskmoor telegram setup"})
+			return
+		}
+		var body struct {
+			Token string `json:"token"`
+		}
+		if err := decode(r, &body); err != nil {
+			writeErr(w, err)
+			return
+		}
+		st, err := s.TelegramSetup(r.Context(), body.Token)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, st)
+	})
+	mux.HandleFunc("POST /api/telegram/pair", func(w http.ResponseWriter, r *http.Request) {
+		code, bot, err := s.TelegramPair()
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"code": code, "bot": bot})
+	})
+	mux.HandleFunc("POST /api/telegram/off", func(w http.ResponseWriter, r *http.Request) {
+		if err := s.TelegramOff(); err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.TelegramStatus())
+	})
 	mux.HandleFunc("GET /api/decisions", func(w http.ResponseWriter, r *http.Request) {
 		ds, err := s.Decisions(0) // all: every override id stays findable
 		if err != nil {
@@ -237,6 +280,11 @@ func (s *Service) Handler(token string, port int) http.Handler {
 		switch {
 		case r.URL.Path == "/api/sign-in" && r.Method == http.MethodPost:
 			s.hSignIn(w, r)
+			return
+		case r.URL.Path == "/api/proof" && r.Method == http.MethodGet:
+			// the service shows it holds the API token without anyone
+			// sending it: a client checks this before handing over a secret
+			writeJSON(w, http.StatusOK, map[string]string{"proof": proof(token, r.URL.Query().Get("nonce"))})
 			return
 		case !strings.HasPrefix(r.URL.Path, "/api/"):
 			// the page itself holds nothing secret; its API calls need a token
@@ -496,4 +544,11 @@ func (s *Service) hEvents(w http.ResponseWriter, r *http.Request) {
 			fl.Flush()
 		}
 	}
+}
+
+// proof is HMAC-SHA256(token, "taskmoor-proof:"+nonce), hex.
+func proof(token, nonce string) string {
+	m := hmac.New(sha256.New, []byte(token))
+	m.Write([]byte("taskmoor-proof:" + nonce))
+	return hex.EncodeToString(m.Sum(nil))
 }

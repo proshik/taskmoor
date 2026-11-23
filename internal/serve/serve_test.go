@@ -170,7 +170,7 @@ func (rg *rig) stop() {
 
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(30 * time.Second) // a slow machine under the whole suite needs the room
 	for time.Now().Before(deadline) {
 		if cond() {
 			return

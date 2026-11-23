@@ -159,6 +159,14 @@ func main() {
 func dispatcher() {
 	data, _ := io.ReadAll(os.Stdin)
 	record("dispatch", map[string]any{"args": os.Args[1:], "prompt": string(data)})
+	if p := os.Getenv("FAKE_DISPATCH_WAIT"); p != "" { // held until the file is there
+		for {
+			if _, err := os.Stat(p); err == nil {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
 	src := os.Getenv("FAKE_DISPATCH_SOURCE")
 	if src == "" {
 		src = "none"

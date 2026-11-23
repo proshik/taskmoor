@@ -644,6 +644,9 @@ function renderUsage() {
   });
   if (S.snap.agents_running) parts.push(h("span", { class: "awake", title: "the service holds macOS's idle-sleep assertion" }, "agents running — keep the Mac awake (lid open or on power)"));
   if (S.snap.awake_error) parts.push(h("span", { class: "err" }, S.snap.awake_error));
+  const tg = S.snap.telegram;
+  if (tg && tg.configured) parts.push(h("span", { class: "chip" + (tg.paired && !tg.error ? "" : " api"),
+    title: tg.error || (tg.paired ? "questions go to Telegram" : "not paired: taskmoor telegram pair") }, "telegram " + (tg.paired ? "✓" : "?")));
   box.replaceChildren(...parts);
 }
 
@@ -790,7 +793,8 @@ function askForm(a) {
         const input = draft(h("input", { type: q.multi_select ? "checkbox" : "radio", name, value: String(i + 1), checked: i === q.recommended && !q.multi_select }), `ask:${a.id}:${qi}:${i}`);
         return h("div", {},
           h("label", {}, input, " " + o.label, i === q.recommended ? h("span", { class: "rec" }, "recommended") : null),
-          o.description ? h("div", { class: "desc" }, o.description) : null);
+          o.description ? h("div", { class: "desc" }, o.description) : null,
+          o.preview ? h("pre", { class: "preview" }, o.preview) : null);
       }));
   });
   const other = draft(h("input", { type: "text", placeholder: "Or answer in your own words (first question)" }), `ask:${a.id}:other`);

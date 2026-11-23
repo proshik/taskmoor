@@ -34,10 +34,13 @@ const (
 // Env is what a run sees of the outside world.
 type Env struct {
 	Stdout, Stderr io.Writer
-	Getenv         func(string) string
-	Dir            string // the working directory
-	Now            func() time.Time
-	Version        string
+	// Stdin is read by commands that take a secret (telegram setup); nil
+	// is the process's.
+	Stdin   io.Reader
+	Getenv  func(string) string
+	Dir     string // the working directory
+	Now     func() time.Time
+	Version string
 	// Harness overrides the harness source found from the environment.
 	Harness harness.Source
 	// TUI runs the board; nil means the board is not available.
@@ -72,6 +75,7 @@ The service (taskmoor serve) and its clients:
   taskmoor keep N [--project P]                        keep N sessions busy with ready tasks (0: off)
   taskmoor decisions [--json]                          what the dispatcher answered, and why
   taskmoor usage [--json]                              each plan's share left and the start guard
+  taskmoor telegram setup | pair | status | off        the bot: token from stdin, one-time pairing
   taskmoor acceptance ID [--diff] [--json]             the work to accept: commits, diff, review, checks
   taskmoor accept ID                                   merge the task's branch into main (trial merge first)
   taskmoor override DECISION N [N…] | --text T          replace a dispatcher answer (sent to the session)
@@ -152,6 +156,8 @@ func Run(ctx context.Context, args []string, env Env) int {
 		return r.decisionsCmd(ctx, rest)
 	case "usage":
 		return r.usageCmd(ctx, rest)
+	case "telegram":
+		return r.telegramCmd(ctx, rest)
 	case "acceptance":
 		return r.acceptanceCmd(ctx, rest)
 	case "accept":
