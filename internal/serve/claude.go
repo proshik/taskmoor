@@ -133,7 +133,11 @@ var deniedTools = []string{
 }
 
 // apiKeyVars are stripped unless the profile allows API billing (C2).
-var apiKeyVars = map[string]bool{"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true}
+// The provider switches are stripped too: Bedrock, Vertex or Foundry bill
+// the cloud account, not the subscription.
+var apiKeyVars = map[string]bool{"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true,
+	"CLAUDE_CODE_USE_BEDROCK": true, "CLAUDE_CODE_USE_VERTEX": true, "CLAUDE_CODE_USE_FOUNDRY": true,
+	"AWS_BEARER_TOKEN_BEDROCK": true}
 
 // releaseVars are publishing and deployment credentials an agent never
 // needs (A11), and the service's own location.

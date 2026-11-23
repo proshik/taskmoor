@@ -200,6 +200,20 @@ func (c *Client) Restart(ctx context.Context, id, profile string) (*Session, err
 	return out.Session, nil
 }
 
+// Decisions lists the dispatcher's decisions, newest first.
+func (c *Client) Decisions(ctx context.Context) ([]Ruling, error) {
+	var out []Ruling
+	err := c.do(ctx, http.MethodGet, "/api/decisions", nil, &out)
+	return out, err
+}
+
+// Override replaces a dispatcher answer with the person's (C3).
+func (c *Client) Override(ctx context.Context, id string, ans Answer) (*Ruling, error) {
+	var out Ruling
+	err := c.do(ctx, http.MethodPost, "/api/decisions/"+url.PathEscape(id)+"/override", ans, &out)
+	return &out, err
+}
+
 // Keep sets a project's "Keep N busy" (A4).
 func (c *Client) Keep(ctx context.Context, project string, n int) error {
 	return c.do(ctx, http.MethodPost, "/api/projects/"+url.PathEscape(project)+"/keep", map[string]any{"n": n}, nil)

@@ -69,7 +69,9 @@ func (h *sessionHost) permission(requestID, tool string, input map[string]any) {
 			_ = r.deny(requestID, "The question could not be read; ask again with questions[] and options[].")
 			return
 		}
-		h.s.openAsk(h.l, &Ask{Kind: "question", Questions: qs, Tool: tool, requestID: requestID, input: input})
+		a := &Ask{Kind: "question", Questions: qs, Tool: tool, requestID: requestID, input: input}
+		h.s.openAsk(h.l, a)
+		go h.s.dispatch(h.l, a) // C3: (a) and (b) without the person
 		return
 	}
 	if strings.HasPrefix(tool, acpAsk) {

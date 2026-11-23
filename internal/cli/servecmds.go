@@ -669,6 +669,88 @@ func (r runner) answerCmd(ctx context.Context, args []string) int {
 	return ExitOK
 }
 
+// decisionsCmd lists the dispatcher's decisions (C3).
+func (r runner) decisionsCmd(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("decisions", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "")
+	pos, err := parse(fs, args)
+	if err == nil && len(pos) > 0 {
+		err = usagef("decisions takes no arguments")
+	}
+	if err != nil {
+		return r.fail(err, *asJSON)
+	}
+	c, err := r.client()
+	if err != nil {
+		return r.fail(err, *asJSON)
+	}
+	ds, err := c.Decisions(ctx)
+	if err != nil {
+		return r.serviceFail(err, *asJSON)
+	}
+	if *asJSON {
+		_ = writeJSON(r.env.Stdout, map[string]any{"format": 1, "decisions": ds})
+		return ExitOK
+	}
+	if len(ds) == 0 {
+		fmt.Fprintln(r.env.Stdout, "the dispatcher has decided nothing yet")
+		return ExitOK
+	}
+	for _, d := range ds {
+		q := ""
+		if len(d.Questions) > 0 {
+			q = d.Questions[0].Question
+		}
+		fmt.Fprintf(r.env.Stdout, "%s  %s  %s  level %s, %s: %s\n", d.ID, d.At, d.Task, d.Level, d.AnsweredBy, text.Line(q))
+		if len(d.Answer) > 0 {
+			var parts []string
+			for _, a := range d.Answer {
+				if len(a) > 0 {
+					parts = append(parts, strings.Join(a, ", "))
+				}
+			}
+			fmt.Fprintf(r.env.Stdout, "  answer: %s\n", text.Line(strings.Join(parts, "; ")))
+		}
+		if d.Citation != "" {
+			fmt.Fprintf(r.env.Stdout, "  citation: %s\n", text.Line(d.Citation))
+		}
+		fmt.Fprintf(r.env.Stdout, "  reason: %s\n", text.Line(d.Reason))
+		if d.Overridden != nil {
+			fmt.Fprintf(r.env.Stdout, "  overridden %s: %s\n", d.Overridden.At, text.Line(d.Overridden.Answer))
+		} else if d.AnsweredBy == "dispatcher" {
+			fmt.Fprintf(r.env.Stdout, "  override: taskmoor override %s N [N…] | --text T\n", d.ID)
+		}
+	}
+	return ExitOK
+}
+
+// overrideCmd replaces a dispatcher answer with the person's (C3).
+func (r runner) overrideCmd(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("override", flag.ContinueOnError)
+	txt := fs.String("text", "", "")
+	pos, err := parse(fs, args)
+	if err == nil && (len(pos) == 0 || len(pos) == 1 && *txt == "") {
+		err = usagef("override takes a decision id, then a choice per question or --text")
+	}
+	if err != nil {
+		return r.usageErr(err)
+	}
+	ans := serve.Answer{Text: *txt}
+	for _, ch := range pos[1:] {
+		ans.Choices = append(ans.Choices, strings.Split(ch, ","))
+	}
+	c, err := r.client()
+	if err != nil {
+		return r.fail(err, false)
+	}
+	d, err := c.Override(ctx, pos[0], ans)
+	if err != nil {
+		return r.serviceFail(err, false)
+	}
+	fmt.Fprintf(r.env.Stdout, "overridden: %s gets the person's answer (%s) as an instruction\n", d.Task, text.Line(d.Overridden.Answer))
+	return ExitOK
+}
+
 func (r runner) stopCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "")

@@ -135,6 +135,27 @@ func (s *Service) Handler(token string, port int) http.Handler {
 	mux.HandleFunc("POST /api/sessions/{id}/handover", s.hHandover)
 	mux.HandleFunc("POST /api/sessions/{id}/restart", s.hRestart)
 	mux.HandleFunc("POST /api/projects/{project}/keep", s.hKeep)
+	mux.HandleFunc("GET /api/decisions", func(w http.ResponseWriter, r *http.Request) {
+		ds, err := s.Decisions(0) // all: every override id stays findable
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, ds)
+	})
+	mux.HandleFunc("POST /api/decisions/{id}/override", func(w http.ResponseWriter, r *http.Request) {
+		var ans Answer
+		if err := decode(r, &ans); err != nil {
+			writeErr(w, err)
+			return
+		}
+		d, err := s.Override(context.WithoutCancel(r.Context()), r.PathValue("id"), ans)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, d)
+	})
 	mux.HandleFunc("POST /api/login-code", func(w http.ResponseWriter, r *http.Request) {
 		// a sign-in link is for whoever holds the API token (the CLI), not
 		// for a board that is already signed in

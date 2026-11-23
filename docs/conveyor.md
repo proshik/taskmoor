@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-23; stages 1, 2, 2b and 3 are implemented.**
+2026-11-23; stages 1, 2, 2b, 3 and 4 are implemented.**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -1077,6 +1077,89 @@ The smallest loop that runs a real agent on a real task.
   dispatcher profile's short call, citations checked against the files,
   audit records, overrides delivered as instructions; "answered by the
   dispatcher" in the feed.
+
+#### Stage 4 — implementation decisions (2026-11-23)
+
+1. **Questions only.** The dispatcher looks at questions; approvals stay
+   with the rules and the person (C3, GLD-049). It runs on its own
+   goroutine after the ask opens: the ask is in the inbox meanwhile
+   (marked "the dispatcher is looking"), the person may answer first.
+   At most two calls at a time.
+2. **Hard stops first (A13).** Before any call: a secret, a required
+   free-text field, a multi-choice question, or a word of the (c)
+   categories in the question, its header or its options (push, publish,
+   deploy, release, merge, delete, remove, drop, rm, secret, token,
+   password, credential, API key, private key, dependency, install,
+   upgrade, licence, migrate, billing, pay) → the person. Codex's
+   optional own-answer field is left empty, not a stop (the real check
+   found every Codex question carries one).
+3. **The call:** the claude `dispatcher_profile` (refused in the config
+   for another harness), `claude -p --output-format stream-json --tools ""
+   --setting-sources= --strict-mcp-config --no-session-persistence`, an
+   empty temporary directory, the prompt on stdin, `DispatchTimeout` 2
+   minutes; an `apiKeySource` other than `none` without the profile's API
+   billing → the person.
+4. **Documents from the main branch** (`git show main:…`): the task
+   file, `AGENTS.md`, `CLAUDE.md`, `README.md`, `docs/*.md`,
+   `spec/*.md`; 48 KiB per file, 192 KiB in all. The agent writes only its
+   branch, so it cannot plant the answer to its own question.
+5. **Checks (A13, A14):** JSON with one entry per question; an option
+   that exists; (a) the file is one of those given and the quote (12+
+   characters, whitespace normalized) is in it; (b) only the recommended
+   option, never for a question without one; any doubt → (c).
+6. **Records:** one JSON file per decision in `<store>/decisions/` (the
+   audit record's fields), published as a `decision` event; the snapshot
+   carries the 30 latest; `taskmoor decisions`, `GET /api/decisions`.
+7. **Override:** for an (a)/(b) decision, once; delivered with Say (it
+   resumes an ended session) as an instruction naming the question, the
+   dispatcher's answer and the person's; recorded as `overridden`.
+8. **Real check** (2026-11-23, dispatcher Claude Sonnet on the
+   subscription, sessions on Codex): with `AGENTS.md` on main saying
+   greeting files contain "hello", Codex asked "hi" (recommended) or
+   "hello"; the dispatcher answered (a) "hello" citing the line verbatim,
+   Codex wrote and committed it; `taskmoor override … hi` sent the
+   person's answer, Codex rewrote the file to "hi". Before the fix in 2,
+   the same question went to the person ("free text").
+9. **Review r1 (16 findings, all confirmed), fixed:** documents are read
+   from `refs/heads/<main>` (a tag of that name is not the branch); a
+   secret's path or a dependency manifest named in a question is a hard
+   stop; an (a) quote must name the chosen option; the chosen option goes
+   by number (a label can be a number), the board's override too;
+   managed Claude settings with hooks or an `apiKeyHelper` keep the
+   dispatcher out; `CLAUDE_CODE_USE_BEDROCK/VERTEX/FOUNDRY` and
+   `AWS_BEARER_TOKEN_BEDROCK` are stripped like API keys (every Claude
+   process); the record is written before the answer goes, a failed
+   write keeps the question the person's, a delivery failure is recorded
+   as such; an ACP answer to a request the agent no longer waits for is
+   refused before the ask is taken; a call waiting for a slot or under
+   way ends when the ask is answered or withdrawn; a secret given earlier
+   is masked in later questions (so the dispatcher never gets it);
+   level-c records get the person's answer; overrides can be repeated
+   and each is recorded before it is sent (undone if sending fails); the
+   board lists the 30 latest dispatcher answers, the CLI and the API all.
+10. **Review r2 (15 findings, the last round), fixed:** a form's message
+    used as its header is masked too, and a session keeps its secret
+    answers in memory for every later runner (a service restart forgets
+    them); two options that mask to one label stay apart; managed
+    settings are read whole (hooks in any file first, then an `env` block
+    with a key or a provider switch, then an `apiKeyHelper`), an
+    unreadable file or macOS managed preferences keep the dispatcher out;
+    a quote worded against something (never, not, avoid, instead…) is the
+    person's; paths are split on every character a name does not use
+    (`file=go.mod#L12`, `--config=.env`); the record is "pending", not
+    overridable, until the answer is in; a call waiting for a slot gives
+    up when the ask ends, and none starts after it ended; the ask is
+    linked to its level-c record before the record is published; the
+    decision list is read from disk once per change; an asynchronous ACP
+    answer says the dispatcher gave it; the board keeps Override after a
+    first one (each is sent like Say, so mid-turn it waits for the next
+    turn; README says so); README says to remove `dispatcher_profile`
+    before going back to an older taskmoor. Recorded, not fixed: whether
+    an override reached the agent is not confirmed beyond Say.
+11. **Real check after r2:** the same question on a new task (DS-003):
+    this time the dispatcher left it to the person (level c), giving as
+    the reason that the task tells the agent to ask the person; the model
+    errs to the person's side, as C3 wants.
 
 ### Stage 5 — review and acceptance
 

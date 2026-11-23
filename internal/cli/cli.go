@@ -70,6 +70,8 @@ The service (taskmoor serve) and its clients:
   taskmoor continue ID                                 hand the session to your terminal (prints the resume command)
   taskmoor restart ID --profile NAME                   a new session of another profile on the same claim and worktree
   taskmoor keep N [--project P]                        keep N sessions busy with ready tasks (0: off)
+  taskmoor decisions [--json]                          what the dispatcher answered, and why
+  taskmoor override DECISION N [N…] | --text T          replace a dispatcher answer (sent to the session)
   taskmoor web [--print]                               open the board in the browser (a one-time sign-in link)
 
 --repo and --source work before or after the subcommand. The board, list,
@@ -143,6 +145,10 @@ func Run(ctx context.Context, args []string, env Env) int {
 		return r.restartCmd(ctx, rest)
 	case "keep":
 		return r.keepCmd(ctx, rest)
+	case "decisions":
+		return r.decisionsCmd(ctx, rest)
+	case "override":
+		return r.overrideCmd(ctx, rest)
 	case "version":
 		if len(rest) > 0 {
 			return r.usageErr(usagef("version takes no arguments"))

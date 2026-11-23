@@ -130,6 +130,36 @@ model = "provider/model"
   automatic start whose agent fails after the claim (no answer from the
   agent, a refused sign-in) leaves the task claimed with the session in
   error and its slot free: Restart it with a profile, or Release it.
+- **The dispatcher (stage 4).** With `dispatcher_profile = "NAME"` (a
+  claude profile; a cheap model is enough) in the config, an agent's
+  question is first looked at by the dispatcher (C3):
+  - (a) the project's documents answer it: it answers with a citation
+    that must be found verbatim in the named file; documents are read
+    from the main branch (`AGENTS.md`, `CLAUDE.md`, `README.md`,
+    `docs/*.md`, `spec/*.md` and the task file), never the task's branch;
+  - (b) technical, reversible, inside the task, with a recommended
+    option: it picks the recommended option;
+  - (c) everything else is yours, and always: push, merge, publish,
+    deploy, deletions, secrets, dependencies, licences, migrations,
+    billing, free-text and multi-choice questions, a reply that does not
+    check out, a failed or API-billed call. Approvals are never the
+    dispatcher's.
+
+  Its call is `claude -p` with no tools, no settings but its own, in an
+  empty directory, 2 minutes at most. The feed says "answered by the
+  dispatcher"; `taskmoor decisions` (and the inbox) lists every decision
+  with its reason and citation; `taskmoor override ID N` (or Override on
+  the board) sends your answer to the same session as an instruction
+  to change course (again if needed: each override is sent). Without
+  `dispatcher_profile` every question is yours; with managed Claude
+  settings that set hooks or an `apiKeyHelper`, every question is yours
+  too (they would run in, or bill, the dispatcher's call). Bedrock, Vertex
+  and Foundry switches are removed from every Claude process unless the
+  profile allows API billing. An override is sent to the session like
+  Say: mid-turn it waits for the next turn, so a session stopped before
+  then does not get it; override again. Before going back to an older
+  taskmoor, remove `dispatcher_profile` from the config (older versions
+  refuse unknown keys).
 - **Codex and OpenCode sessions.** Questions arrive as forms (Codex asks in
   its Default mode with `default_mode_request_user_input`); approvals as
   ACP permission requests, through the same rules as Claude's; what the

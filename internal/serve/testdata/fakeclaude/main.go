@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -81,6 +82,10 @@ func main() {
 	if err != nil {
 		os.Exit(9)
 	}
+	if strings.Contains(strings.Join(os.Args, " "), "--no-session-persistence") {
+		dispatcher() // the dispatcher's one short call
+		return
+	}
 	argv := append([]string(nil), os.Args[1:]...)
 	for i := range argv {
 		if argv[i] == "--settings" && i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "{") {
@@ -147,4 +152,17 @@ func main() {
 	// like claude: read until the input closes
 	for next() != nil {
 	}
+}
+
+// dispatcher plays the dispatcher's call: it records the prompt and its
+// arguments and answers $FAKE_DISPATCH.
+func dispatcher() {
+	data, _ := io.ReadAll(os.Stdin)
+	record("dispatch", map[string]any{"args": os.Args[1:], "prompt": string(data)})
+	src := os.Getenv("FAKE_DISPATCH_SOURCE")
+	if src == "" {
+		src = "none"
+	}
+	emit(map[string]any{"type": "system", "subtype": "init", "apiKeySource": src})
+	emit(map[string]any{"type": "result", "subtype": "success", "is_error": false, "result": os.Getenv("FAKE_DISPATCH")})
 }

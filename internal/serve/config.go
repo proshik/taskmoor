@@ -57,6 +57,9 @@ type Config struct {
 	// Editor opens a worktree from the board: the command and its first
 	// arguments, the worktree is added last (e.g. ["code", "-n"]).
 	Editor []string `toml:"editor,omitempty"`
+	// DispatcherProfile is the claude profile of the dispatcher's short
+	// call (A13); empty: the dispatcher is off, the person answers all.
+	DispatcherProfile string `toml:"dispatcher_profile,omitempty"`
 }
 
 // Project is a registered repository.
@@ -183,6 +186,11 @@ func (c *Config) Check(path string) error {
 	}
 	if c.Profile(c.DefaultProfile) == nil {
 		return fmt.Errorf("%s: default_profile %q is not a profile", path, c.DefaultProfile)
+	}
+	if n := c.DispatcherProfile; n != "" {
+		if p := c.Profile(n); p == nil || p.Harness != "claude" {
+			return fmt.Errorf("%s: dispatcher_profile %q is not a claude profile", path, n)
+		}
 	}
 	names := map[string]bool{}
 	for _, p := range c.Projects {

@@ -35,6 +35,12 @@ type Service struct {
 	CodexLogin func() (string, error)
 
 	keep keeper
+	// dispatchSem bounds the dispatcher's concurrent calls; overMu orders
+	// overrides.
+	dispatchSem chan struct{}
+	overMu      sync.Mutex
+	decMu       sync.Mutex
+	decCache    []Ruling // nil: read the store again
 
 	journal *journal
 	bus     *bus
@@ -76,6 +82,9 @@ type live struct {
 	stmu sync.Mutex
 	// sayMu orders a Say's check-and-send against a Restart taking over.
 	sayMu sync.Mutex
+	// secrets are the secret answers given in this session, in memory
+	// only, so every later runner masks them (under Service.mu)
+	secrets []string
 }
 
 // Ask is a question or an approval waiting for the person.
@@ -92,10 +101,14 @@ type Ask struct {
 	// command, or the file and what is written.
 	Detail string `json:"detail,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// Dispatch is the dispatcher's word on a question: looking, or why it
+	// is the person's.
+	Dispatch string `json:"dispatch,omitempty"`
 
 	requestID string
 	input     map[string]any
-	opened    bool // announced: visible in snapshots and answerable
+	opened    bool   // announced: visible in snapshots and answerable
+	decision  string // the dispatcher's level-c record, completed by the answer
 }
 
 // Question is a normalized question (see "Normalized question").
@@ -177,8 +190,9 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 		return nil, err
 	}
 	s := &Service{Paths: paths, Version: version, Now: time.Now, Env: env, Home: home, lock: lock, Opener: runDetached, CodexLogin: codexLoginStatus,
-		keep:    keeper{failed: map[string]time.Time{}, errs: map[string]string{}},
-		journal: j, bus: newBus(), sessions: map[string]*live{}, asks: map[string]*Ask{}, owners: map[string]*os.File{}}
+		keep:        keeper{failed: map[string]time.Time{}, errs: map[string]string{}},
+		dispatchSem: make(chan struct{}, 2),
+		journal:     j, bus: newBus(), sessions: map[string]*live{}, asks: map[string]*Ask{}, owners: map[string]*os.File{}}
 	s.auth = newWebAuth(func() time.Time { return s.Now() }, filepath.Join(paths.Store, "web-sessions.json"))
 	old, err := j.sessions()
 	if err != nil {
@@ -737,6 +751,8 @@ func (s *Service) launch(l *live, resume bool, first string, plan *sandboxPlan) 
 				Model: l.s.Model, APIBilling: l.profile.APIBilling, Env: s.Env, Extra: extra,
 				OnSession:      func(id string) { s.agentSession(l, id) },
 				OnPrompted:     func() { s.agentPrompted(l) },
+				Secrets:        s.sessionSecrets(l),
+				OnSecret:       func(v string) { s.mu.Lock(); l.secrets = append(l.secrets, v); s.mu.Unlock() },
 				OnModelRefused: func() { s.mu.Lock(); l.s.Model = ""; s.mu.Unlock(); s.saveAndPublish(l) }}, h)
 		}
 	}
@@ -934,7 +950,11 @@ func (s *Service) attach(l *live) error {
 }
 
 // AnswerAsk delivers the person's answer.
-func (s *Service) AnswerAsk(id string, ans Answer) error {
+func (s *Service) AnswerAsk(id string, ans Answer) error { return s.answerAs(id, ans, "person", "") }
+
+// answerAs answers an ask for the person or the dispatcher; note heads the
+// feed's record of the answer.
+func (s *Service) answerAs(id string, ans Answer, by, note string) error {
 	s.mu.Lock()
 	a := s.asks[id]
 	var l *live
@@ -962,6 +982,7 @@ func (s *Service) AnswerAsk(id string, ans Answer) error {
 		if e != nil {
 			return e
 		}
+		input["by"] = by // an asynchronous ACP answer says who gave it
 		reply, text = func() error { return r.allow(a.requestID, input) }, summary
 	default:
 		if ans.Allow {
@@ -986,9 +1007,36 @@ func (s *Service) AnswerAsk(id string, ans Answer) error {
 	if !s.take(a) {
 		return &NotFound{Msg: fmt.Sprintf("ask %s was already answered or withdrawn", id)}
 	}
-	s.resolve(l, a, text, "person")
-	return reply()
+	if note != "" {
+		text = note + " → " + text
+	}
+	s.resolve(l, a, text, by)
+	s.mu.Lock()
+	dec := a.decision
+	s.mu.Unlock()
+	if by == "person" && dec != "" {
+		s.personAnswered(dec, text)
+	}
+	if err := reply(); err != nil {
+		// recorded as answered, but the agent did not get it: say so
+		s.addActivity(l, Activity{Type: ActError, Text: "the answer did not reach the agent: " + err.Error()})
+		return &deliveryError{err}
+	}
+	return nil
 }
+
+func (s *Service) sessionSecrets(l *live) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), l.secrets...)
+}
+
+// deliveryError: the ask was answered and recorded, but the reply did not
+// reach the agent.
+type deliveryError struct{ err error }
+
+func (e *deliveryError) Error() string { return e.err.Error() }
+func (e *deliveryError) Unwrap() error { return e.err }
 
 // take removes a pending ask; false when another answer took it first.
 func (s *Service) take(a *Ask) bool {
@@ -1074,6 +1122,10 @@ type Snapshot struct {
 	Projects []ProjectState `json:"projects"`
 	Sessions []Session      `json:"sessions"`
 	Asks     []Ask          `json:"asks"`
+	// Decisions are the dispatcher's latest decisions; Dispatcher names its
+	// profile ("" when it is off).
+	Decisions  []Ruling `json:"decisions"`
+	Dispatcher string   `json:"dispatcher"`
 }
 
 // ProfileView is a profile as clients show it.
@@ -1118,7 +1170,17 @@ func (s *Service) Snapshot(ctx context.Context) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := &Snapshot{Epoch: epoch, Rev: rev, Profiles: []ProfileView{}, Projects: []ProjectState{}, Sessions: []Session{}, Asks: []Ask{}}
+	out := &Snapshot{Epoch: epoch, Rev: rev, Profiles: []ProfileView{}, Projects: []ProjectState{}, Sessions: []Session{}, Asks: []Ask{},
+		Dispatcher: cfg.DispatcherProfile}
+	// the 30 latest the dispatcher answered: those the person may override
+	out.Decisions = []Ruling{}
+	if ds, err := s.Decisions(0); err == nil {
+		for _, d := range ds {
+			if d.AnsweredBy == "dispatcher" && len(out.Decisions) < 30 {
+				out.Decisions = append(out.Decisions, d)
+			}
+		}
+	}
 	for _, p := range cfg.Profiles {
 		out.Profiles = append(out.Profiles, ProfileView{Name: p.Name, Harness: p.Harness, Model: p.Model, APIBilling: p.APIBilling, Runnable: runnable[p.Harness], Confined: p.Confined(), Isolation: p.Isolation()})
 	}

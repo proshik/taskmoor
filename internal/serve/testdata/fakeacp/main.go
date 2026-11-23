@@ -253,14 +253,23 @@ func turn(id any, params map[string]any) {
 		say("content: " + string(data))
 		end("end_turn")
 	case "question", "opencode":
-		prop := map[string]any{"type": "string", "title": "Which store?", "description": "Storage",
+		title := "Which store?"
+		if t := os.Getenv("FAKE_QUESTION"); t != "" {
+			title = t
+		}
+		prop := map[string]any{"type": "string", "title": title, "description": "Storage",
 			"oneOf": []any{map[string]any{"const": "files", "title": "Plain files"}, map[string]any{"const": "sqlite", "title": "SQLite (Recommended)"}}}
 		if os.Getenv("FAKE_SCENARIO") == "opencode" {
 			prop = map[string]any{"type": "string", "title": "Which store?", "default": "sqlite",
 				"oneOf": []any{map[string]any{"const": "files", "title": "Plain files"}, map[string]any{"const": "sqlite", "title": "SQLite"}}}
 		}
+		props := map[string]any{"store": prop}
+		if os.Getenv("FAKE_NOTE") != "" { // codex-acp's own-answer field beside the choice
+			props["store_note"] = map[string]any{"type": "string", "title": "Additional answer or note",
+				"_meta": map[string]any{"codex": map[string]any{"role": "user_note", "questionId": "store"}}}
+		}
 		res := request("elicitation/create", map[string]any{"sessionId": session, "mode": "form", "message": "Codex needs your input to continue.",
-			"requestedSchema": map[string]any{"type": "object", "properties": map[string]any{"store": prop}, "required": []any{"store"}}})
+			"requestedSchema": map[string]any{"type": "object", "properties": props, "required": []any{"store"}}})
 		content, _ := res["content"].(map[string]any)
 		say(fmt.Sprintf("answer: %v %v", res["action"], content["store"]))
 		end("end_turn")

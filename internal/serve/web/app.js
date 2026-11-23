@@ -606,13 +606,46 @@ function inboxView() {
   const out = [h("h1", {}, "Needs you")];
   if (!asks.length) out.push(h("p", { class: "empty" }, "Nothing waits for you."));
   for (const a of asks) out.push(askForm(a));
+  // what the dispatcher answered (C3): the person can override (a)/(b)
+  const ds = (S.snap.decisions || []).filter(d => d.answered_by === "dispatcher");
+  out.push(h("h3", {}, "Answered by the dispatcher"));
+  if (!S.snap.dispatcher) out.push(h("p", { class: "empty" }, "The dispatcher is off (dispatcher_profile in the config): every question comes here."));
+  else if (!ds.length) out.push(h("p", { class: "empty" }, "Nothing yet."));
+  for (const d of ds) out.push(decisionView(d));
   return out;
+}
+
+function decisionView(d) {
+  const err = h("div", { class: "err" });
+  const q = d.questions.find(x => !(x.free_text && x.optional)) || { question: "", options: [] };
+  const answer = (d.answer || []).filter(a => a && a.length).map(a => a.join(", ")).join("; ");
+  const parts = [h("div", { class: "row" }, h("b", {}, d.project + " · " + d.task), " ", h("span", { class: "chip" }, "level " + d.level), " ", h("span", { class: "t" }, clock(d.at))),
+    h("div", { class: "q" }, d.questions.filter(x => !(x.free_text && x.optional)).map(x => x.question).join(" / ")),
+    h("div", {}, "→ " + answer),
+    d.citation ? h("div", { class: "desc" }, d.citation) : null,
+    h("div", { class: "desc" }, d.reason)];
+  if (d.overridden) parts.push(h("div", {}, "overridden: " + d.overridden.answer + " (sent " + clock(d.overridden.at) + ")"));
+  if (d.questions.filter(x => !(x.free_text && x.optional)).length === 1) {
+    const key = "override:" + d.id;
+    // by number: a label can itself be a number
+    const sel = draft(h("select", { "aria-label": "Your answer" }, (q.options || []).map((o, i) => h("option", { value: String(i + 1) }, o.label))), key);
+    parts.push(h("div", { class: "actions" }, sel, h("button", { type: "button", onclick: async () => {
+      if (!confirmStep("Send your answer to the session? The agent may already have acted on the dispatcher's.")) return;
+      try { await api("POST", `/api/decisions/${encodeURIComponent(d.id)}/override`, { choices: [[sel.value]] }); forget(key); await refresh(); }
+      catch (e) { err.textContent = e.message; }
+    } }, "Override")));
+  } else {
+    parts.push(h("div", { class: "desc" }, "override: taskmoor override " + d.id + " N …"));
+  }
+  parts.push(err);
+  return h("div", { class: "ask decided" }, parts);
 }
 
 function askForm(a) {
   const err = h("div", { class: "err" });
   const head = h("div", { class: "row" }, h("b", {}, a.project + " · " + a.task), " ", h("span", { class: "chip" }, a.kind), " ",
-    h("a", { href: "#", onclick: (e) => { e.preventDefault(); openTask(a.project, a.task); } }, "open the task"));
+    h("a", { href: "#", onclick: (e) => { e.preventDefault(); openTask(a.project, a.task); } }, "open the task"),
+    a.dispatch ? h("div", { class: "desc" }, "dispatcher: " + a.dispatch) : null);
   const send = async (body) => {
     err.textContent = "";
     try { await api("POST", `/api/asks/${encodeURIComponent(a.id)}/answer`, body); forget("ask:" + a.id); await refresh(); }

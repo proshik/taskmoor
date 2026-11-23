@@ -45,6 +45,10 @@ type acpStart struct {
 	OnSession func(id string)
 	// OnModelRefused: the agent does not offer Model; its default runs.
 	OnModelRefused func()
+	// Secrets are the session's secret answers so far (masked in what this
+	// runner records); OnSecret receives new ones.
+	Secrets  []string
+	OnSecret func(string)
 	// OnPrompted: the first prompt is out, so the conversation exists for
 	// the agent's own resume (Codex writes its rollout then).
 	OnPrompted func()
@@ -81,6 +85,7 @@ type acpRunner struct {
 	secrets  []string            // secret answers given: kept out of the feed
 	prompted bool                // the first prompt went out
 	onPrompt func()              // called once, when it did
+	onSecret func(string)        // a secret answer given: the session keeps it
 	turns    sync.WaitGroup      // prompt goroutines, joined before exited
 }
 
@@ -157,7 +162,8 @@ func startACP(s acpStart, host claudeHost) (*acpRunner, error) {
 	}
 	pw.Close()
 	r := &acpRunner{cmd: cmd, stdin: stdin, host: host, harness: s.Harness, done: make(chan struct{}), reqs: map[string]*acpPending{},
-		dir: s.Dir, paths: map[string][]string{}, onPrompt: s.OnPrompted}
+		dir: s.Dir, paths: map[string][]string{}, onPrompt: s.OnPrompted,
+		secrets: append([]string(nil), s.Secrets...), onSecret: s.OnSecret}
 	r.conn = newACPConn(stdin, r.handle)
 	host.bind(r)
 	readDone := make(chan struct{})
@@ -913,6 +919,7 @@ func (r *acpRunner) elicitation(id, params json.RawMessage) {
 				q = parent.Title + " — your own answer"
 			}
 		}
+		q = r.redact(q) // the key and the text shown are the same
 		if _, dup := pend.fields[q]; dup {
 			q += " (" + k + ")" // two fields of one title stay two questions
 		}
@@ -948,14 +955,23 @@ func (r *acpRunner) elicitation(id, params json.RawMessage) {
 			if def != "" && o.value == def && !strings.Contains(label, "(Recommended)") {
 				label += " (Recommended)" // opencode marks it with default (F18)
 			}
-			fd.consts[label] = o.value
-			options = append(options, map[string]any{"label": label, "description": o.desc})
+			shown := r.redact(label)
+			for n := 2; ; n++ { // masking can make two labels one: keep them apart
+				if _, taken := fd.consts[shown]; !taken {
+					break
+				}
+				shown = fmt.Sprintf("%s (%d)", r.redact(label), n)
+			}
+			fd.consts[shown] = o.value
+			options = append(options, map[string]any{"label": shown, "description": r.redact(o.desc)})
 		}
 		header := f.Description
 		if order[k] == 0 {
 			header = strings.TrimSpace(header + " (optional)")
 		}
-		questions = append(questions, map[string]any{"question": q, "header": header, "options": options,
+		// a secret given earlier and repeated by the agent is not shown, nor
+		// sent on (to the dispatcher)
+		questions = append(questions, map[string]any{"question": r.redact(q), "header": r.redact(header), "options": options,
 			"multiSelect": f.Type == "array", "freeText": len(options) == 0, "optional": order[k] == 0, "secret": fd.secret})
 	}
 	if len(questions) == 0 {
@@ -970,7 +986,7 @@ func (r *acpRunner) elicitation(id, params json.RawMessage) {
 	r.flush()
 	if p.Message != "" && len(questions) == 1 {
 		if m, ok := questions[0].(map[string]any); ok && m["header"] == "" {
-			m["header"] = p.Message
+			m["header"] = r.redact(p.Message)
 		}
 	}
 	if pend.async {
@@ -1082,7 +1098,10 @@ func (r *acpRunner) check(requestID string, input map[string]any) error {
 	r.mu.Lock()
 	p := r.reqs[requestID]
 	r.mu.Unlock()
-	if p == nil || p.kind != "elicitation" {
+	if p == nil {
+		return errors.New("the agent no longer waits for this answer") // the ask stays, and is withdrawn
+	}
+	if p.kind != "elicitation" {
 		return nil
 	}
 	_, _, err := p.formContent(input)
@@ -1113,6 +1132,9 @@ func (r *acpRunner) allow(requestID string, input map[string]any) error {
 		if f.secret {
 			if v, ok := content[f.key].(string); ok {
 				r.secrets = append(r.secrets, v)
+				if r.onSecret != nil {
+					r.onSecret(v) // kept by the session for the runners after this one
+				}
 			}
 			_ = q
 		}
@@ -1120,7 +1142,11 @@ func (r *acpRunner) allow(requestID string, input map[string]any) error {
 	r.mu.Unlock()
 	if p.async {
 		// the secret goes to the agent; the prompt the feed records is redacted
-		return r.answer("The person answered your question (" + p.asked + "): " + said + secretValues(p, content))
+		who := "The person"
+		if by, _ := input["by"].(string); by == "dispatcher" {
+			who = "taskmoor's dispatcher"
+		}
+		return r.answer(who + " answered your question (" + p.asked + "): " + said + secretValues(p, content))
 	}
 	return r.conn.reply(p.id, map[string]any{"action": "accept", "content": content})
 }
