@@ -12,10 +12,11 @@ const COLUMNS = [
   ["backlog", "Backlog"], ["ready", "Ready"], ["running", "Running"],
   ["needs", "Needs you"], ["review", "Review"], ["merged", "Merged"], ["done", "Done"],
 ];
-const ENDED = new Set(["complete", "error", "stopped", "stale", "handedOver"]);
+const ENDED = new Set(["complete", "error", "stopped", "stale", "handedOver", "accepted"]);
 
 const S = {
   snap: null,
+  accept: {},           // acceptance views by session id, loaded on request
   project: localGet("project"),
   selected: null,       // {project, task} whose panel is open
   inbox: false,         // the inbox panel is open
@@ -344,6 +345,7 @@ function card(project, t, sess, col) {
     meta.push(h("span", { class: "st-" + sess.state }, "● " + stateWord(sess.state)));
     if (sess.billing) meta.push(billingChip(sess.billing));
     if (!sess.confined) meta.push(isolationChip(sess.isolation));
+    if (sess.review) meta.push(h("span", { class: "chip", title: "code review (revust)" }, "review " + sess.review.done + "/" + sess.review.rounds + " " + sess.review.state));
   } else if (t.harness) {
     meta.push(h("span", { class: "st-" + t.harness.status }, "● " + t.harness.status));
   }
@@ -539,8 +541,61 @@ function sessionView(sess) {
       }
     }, "primary"))) : h("p", { class: "empty" }, "This session continues in your terminal; finish with `taskmoor review " + sess.task + "`."),
     err,
+    acceptanceView(sess),
     h("h3", {}, "Feed"),
     h("ul", { class: "feed", id: "feed", "data-session": sess.id })];
+}
+
+// acceptanceView is the review and Accept (A5, A8): loaded on request,
+// the diff can be large.
+function acceptanceView(sess) {
+  if (sess.state === "accepted") return h("p", {}, "Accepted: merged as " + (sess.merged || "").slice(0, 12) + ". Push is yours.");
+  const rv = sess.review;
+  const box = h("div", { class: "acceptance" });
+  const head = [h("h3", {}, "Acceptance")];
+  if (rv) head.push(h("p", {}, "Review: " + rv.done + " of " + rv.rounds + " round(s), " + rv.state + (rv.partial ? " (partial: " + rv.partial + ")" : "") +
+    (rv.findings ? " (" + rv.findings + " finding(s))" : "") + (rv.unreviewed ? "; the last fixes are not reviewed again" : "") + (rv.error ? " — " + rv.error : "")));
+  const err = h("div", { class: "err" });
+  const load = async () => {
+    err.textContent = "";
+    try { S.accept[sess.id] = await api("GET", `/api/sessions/${encodeURIComponent(sess.id)}/acceptance`); render(); }
+    catch (e) { err.textContent = e.message; }
+  };
+  const a = S.accept[sess.id];
+  if (!a) { box.replaceChildren(...head, h("div", { class: "actions" }, h("button", { type: "button", onclick: load }, "Show the work to accept")), err); return box; }
+  const sendKey = "sendback:" + sess.id;
+  const note = draft(h("textarea", { placeholder: "What to change (sent back to the session)…" }), sendKey);
+  box.replaceChildren(...[...head,
+    h("p", {}, a.ready ? "Ready to accept." : "Not ready: " + a.why),
+    h("div", { class: "desc" }, (a.commits || []).length + " commit(s) on " + a.session.branch + " since " + a.base.slice(0, 10) + ", up to " + (a.tip || "").slice(0, 10)),
+    h("ul", {}, (a.commits || []).map(c => h("li", { class: "mono" }, c))),
+    h("pre", { class: "mono body" }, a.stat || "(no changes)"),
+    a.dirty ? h("p", { class: "err" }, "Uncommitted in the worktree (not merged): " + a.dirty) : null,
+    a.checks ? [h("h3", {}, "Checks"), h("div", { class: "body" }, a.checks)] : null,
+    a.result ? [h("h3", {}, "The agent's summary"), h("div", { class: "body" }, a.result)] : null,
+    rv && rv.report ? h("details", {}, h("summary", {}, "Review findings"), h("pre", { class: "body" }, rv.report)) : null,
+    h("details", {}, h("summary", {}, "Diff" + (a.diff_cut ? " (cut)" : "")), h("pre", { class: "mono body diff" }, a.diff)),
+    h("div", { class: "actions" },
+      h("button", { type: "button", class: "primary", disabled: !a.ready, onclick: async () => {
+        if (!confirmStep("Merge " + sess.branch + " at " + (a.tip || "").slice(0, 10) + " into " + a.main_branch + "? A trial merge runs first; push stays yours.")) return;
+        err.textContent = "";
+        try {
+          // exactly the commit shown: a branch that moved since is refused
+          const r = await api("POST", `/api/sessions/${encodeURIComponent(sess.id)}/accept`, { tip: a.tip });
+          delete S.accept[sess.id];
+          banner(r.conflicted ? "Conflicts with " + a.main_branch + ((r.conflicts || []).length ? " in " + r.conflicts.join(", ") : "") + ": sent back to the session." : "Merged as " + (r.merged || "").slice(0, 12) + ". Push is yours.");
+          await refresh();
+        } catch (e) { err.textContent = e.message; }
+      } }, "Accept"),
+      h("button", { type: "button", onclick: load }, "Refresh")),
+    note,
+    h("div", { class: "actions" }, h("button", { type: "button", onclick: async () => {
+      if (!note.value.trim()) return;
+      try { await api("POST", `/api/sessions/${encodeURIComponent(sess.id)}/say`, { text: "Sent back from acceptance: " + note.value }); forget(sendKey); delete S.accept[sess.id]; await refresh(); }
+      catch (e) { err.textContent = e.message; }
+    } }, "Send back")),
+    err].flat(Infinity).filter(x => x != null)); // replaceChildren takes nodes only
+  return box;
 }
 
 // isolationChip marks a session whose commands are not in Claude's sandbox.

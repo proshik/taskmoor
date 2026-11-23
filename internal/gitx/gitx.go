@@ -541,3 +541,42 @@ func (r Repo) Worktrees(ctx context.Context) ([]Worktree, error) {
 	}
 	return list, nil
 }
+
+// ExitCode is git's exit code in an error of Run, or -1.
+func ExitCode(err error) int { return exitCode(err) }
+
+// RunLimited is Run keeping at most limit bytes of stdout (the rest is
+// read and dropped, so git does not block); cut reports a longer output.
+func (r Repo) RunLimited(ctx context.Context, limit int, args ...string) (out []byte, cut bool, err error) {
+	full := append([]string{"-C", r.Dir}, args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.Env = readOnlyEnv()
+	lw := &limitBuffer{n: limit}
+	var errb bytes.Buffer
+	cmd.Stdout = lw
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		return lw.b.Bytes(), lw.cut, &Error{Args: args, Stderr: errb.String(), Err: err}
+	}
+	return lw.b.Bytes(), lw.cut, nil
+}
+
+type limitBuffer struct {
+	b   bytes.Buffer
+	n   int
+	cut bool
+}
+
+func (l *limitBuffer) Write(p []byte) (int, error) {
+	if room := l.n - l.b.Len(); room > 0 {
+		if len(p) > room {
+			l.b.Write(p[:room])
+			l.cut = true
+		} else {
+			l.b.Write(p)
+		}
+	} else if len(p) > 0 {
+		l.cut = true
+	}
+	return len(p), nil
+}

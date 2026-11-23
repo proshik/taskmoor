@@ -71,6 +71,8 @@ The service (taskmoor serve) and its clients:
   taskmoor restart ID --profile NAME                   a new session of another profile on the same claim and worktree
   taskmoor keep N [--project P]                        keep N sessions busy with ready tasks (0: off)
   taskmoor decisions [--json]                          what the dispatcher answered, and why
+  taskmoor acceptance ID [--diff] [--json]             the work to accept: commits, diff, review, checks
+  taskmoor accept ID                                   merge the task's branch into main (trial merge first)
   taskmoor override DECISION N [N…] | --text T          replace a dispatcher answer (sent to the session)
   taskmoor web [--print]                               open the board in the browser (a one-time sign-in link)
 
@@ -147,6 +149,10 @@ func Run(ctx context.Context, args []string, env Env) int {
 		return r.keepCmd(ctx, rest)
 	case "decisions":
 		return r.decisionsCmd(ctx, rest)
+	case "acceptance":
+		return r.acceptanceCmd(ctx, rest)
+	case "accept":
+		return r.acceptCmd(ctx, rest)
 	case "override":
 		return r.overrideCmd(ctx, rest)
 	case "version":

@@ -161,7 +161,8 @@ func text(params map[string]any) string {
 func turn(id any, params map[string]any) {
 	prompt := text(params)
 	end := func(reason string) { reply(id, map[string]any{"stopReason": reason}) }
-	if strings.HasPrefix(prompt, "more") || strings.HasPrefix(prompt, "again") || strings.HasPrefix(prompt, "The person") {
+	if strings.HasPrefix(prompt, "more") || strings.HasPrefix(prompt, "again") || strings.HasPrefix(prompt, "The person") ||
+		strings.HasPrefix(prompt, "Code review") || strings.HasPrefix(prompt, "Accept found") || strings.HasPrefix(prompt, "Sent back") {
 		say("resumed with: " + prompt)
 		end("end_turn")
 		return

@@ -166,6 +166,8 @@ func (h *sessionHost) exited(code int, err error) {
 		}
 	}
 	switch {
+	case st == StateAccepted:
+		// accepted while the process was exiting: that is the end
 	case st == StateComplete || st == StateError:
 		// the turn had already ended (a stop or shutdown that arrives while
 		// the process exits does not undo that)

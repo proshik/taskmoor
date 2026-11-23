@@ -67,6 +67,12 @@ func (s *Service) Restart(ctx context.Context, id, profile string) (*Session, er
 		r.stop(5 * time.Second)
 		<-r.finished()
 	}
+	// a running review ends first and is counted, so the budget that goes
+	// with the claim is the real one
+	s.stopReview(l)
+	for i := 0; i < 600 && s.reviewRunning(l); i++ {
+		time.Sleep(50 * time.Millisecond)
+	}
 	if !s.ownsClaim(l) {
 		return nil, refusedf("%s's claim is not this session's any more", l.s.Task)
 	}
@@ -83,6 +89,15 @@ func (s *Service) Restart(ctx context.Context, id, profile string) (*Session, er
 	rec := &Session{ID: nid, Project: l.s.Project, Task: l.s.Task, Title: l.s.Title, Profile: prof.Name, Harness: prof.Harness,
 		Model: taskModel(t, prof), Worktree: l.s.Worktree, Branch: l.s.Branch, State: StatePending, StartedAt: now, UpdatedAt: now,
 		ProjectPath: l.s.ProjectPath, Confined: prof.Confined(), Isolation: prof.Isolation(), RestartOf: l.s.ID}
+	s.mu.Lock()
+	if l.s.Review != nil { // the task's review budget goes with its claim
+		rv := *l.s.Review
+		if rv.State == "running" {
+			rv.State, rv.Error = "error", "stopped by the restart"
+		}
+		rec.Review = &rv
+	}
+	s.mu.Unlock()
 	if prof.Harness == "claude" {
 		rec.Resume = fmt.Sprintf("cd %s && claude --resume %s", shellQuote(l.s.Worktree), nid)
 	}

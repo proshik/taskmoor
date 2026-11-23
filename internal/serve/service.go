@@ -40,7 +40,10 @@ type Service struct {
 	dispatchSem chan struct{}
 	overMu      sync.Mutex
 	decMu       sync.Mutex
-	decCache    []Ruling // nil: read the store again
+	reviewSem   chan struct{}  // one review round at a time
+	reviews     sync.WaitGroup // review rounds under way, joined by Shutdown
+	acceptMu    sync.Mutex     // one merge at a time
+	decCache    []Ruling       // nil: read the store again
 
 	journal *journal
 	bus     *bus
@@ -82,6 +85,12 @@ type live struct {
 	stmu sync.Mutex
 	// sayMu orders a Say's check-and-send against a Restart taking over.
 	sayMu sync.Mutex
+	// reviewCancel stops a running review round.
+	reviewCancel context.CancelFunc
+	reviewGen    uint64 // the round reviewCancel belongs to
+	// completing: a turn's completion is being recorded and its review
+	// decided; Accept waits for it
+	completing bool
 	// secrets are the secret answers given in this session, in memory
 	// only, so every later runner masks them (under Service.mu)
 	secrets []string
@@ -192,6 +201,7 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 	s := &Service{Paths: paths, Version: version, Now: time.Now, Env: env, Home: home, lock: lock, Opener: runDetached, CodexLogin: codexLoginStatus,
 		keep:        keeper{failed: map[string]time.Time{}, errs: map[string]string{}},
 		dispatchSem: make(chan struct{}, 2),
+		reviewSem:   make(chan struct{}, 1),
 		journal:     j, bus: newBus(), sessions: map[string]*live{}, asks: map[string]*Ask{}, owners: map[string]*os.File{}}
 	s.auth = newWebAuth(func() time.Time { return s.Now() }, filepath.Join(paths.Store, "web-sessions.json"))
 	old, err := j.sessions()
@@ -203,6 +213,15 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 		l := &live{s: rec, pending: map[string]string{}}
 		s.sessions[rec.ID] = l
 		stale := false
+		switch rec.State {
+		}
+		if rec.Review != nil && rec.Review.State == "running" {
+			// the service stopped during the round: it did not finish
+			rv := *rec.Review
+			rv.State, rv.Error = "error", "the service restarted during the review"
+			rec.Review = &rv
+			_ = j.saveSession(rec)
+		}
 		switch rec.State {
 		case StatePending, StateActive, StateAwaitingInput:
 			stale = true
@@ -242,6 +261,22 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 				f.Lifecycle = state.Review
 				f.Harness = &state.Harness{Name: rec.Harness, Status: "done", ObservedAt: stamp(s.Now()), Session: rec.ID}
 			})
+		}
+	}
+	// reviews a stop cut off: findings saved but not delivered stay shown
+	// (and do not hold Accept); a completed session owed its review gets it
+	for _, l := range s.sessions {
+		rv := l.s.Review
+		if rv != nil && rv.State == "findings" && !rv.Unreviewed && !rv.SendFailed {
+			cp := *rv
+			cp.SendFailed = true
+			l.s.Review = &cp
+			_ = j.saveSession(l.s)
+		}
+		if l.app != nil && l.s.State == StateComplete && rv == nil && s.ownsClaim(l) {
+			if lc, err := s.lifecycle(l); err == nil && lc == state.Review {
+				go s.afterComplete(l)
+			}
 		}
 	}
 	// a predecessor whose successor took the claim but was not marked (a
@@ -782,11 +817,16 @@ func (s *Service) Stop(id string) error {
 	if err != nil {
 		return err
 	}
+	s.stopReview(l) // a review of this session does not outlive it
 	s.mu.Lock()
 	r := l.runner
 	l.stopping = true
+	reviewing := l.s.Review != nil && l.s.Review.State == "running"
 	s.mu.Unlock()
 	if r == nil {
+		if reviewing {
+			return nil // the review was what ran: it is stopped
+		}
 		return refusedf("session %s is not running", l.s.ID)
 	}
 	r.stop(5 * time.Second)
@@ -888,10 +928,13 @@ func (s *Service) Release(ctx context.Context, id string) (string, error) {
 		return "", err
 	}
 	s.mu.Lock()
-	if l.starting {
+	if l.starting || l.handingOver {
 		s.mu.Unlock()
-		return "", refusedf("session %s is starting; try again in a moment", l.s.ID)
+		return "", refusedf("session %s is starting, being accepted or changing hands; try again in a moment", l.s.ID)
 	}
+	s.mu.Unlock()
+	s.stopReview(l) // a review of this session does not outlive it
+	s.mu.Lock()
 	r := l.runner
 	l.stopping = true
 	s.mu.Unlock()
@@ -1225,6 +1268,8 @@ func (s *Service) Shutdown() {
 	s.mu.Lock()
 	s.closing = true
 	s.mu.Unlock()
+	s.acceptMu.Lock() // an Accept under way finishes its git work first
+	s.acceptMu.Unlock()
 	s.launches.Wait() // every admitted launch has bound its runner or failed
 	s.mu.Lock()
 	var rs []agentRunner
@@ -1242,6 +1287,15 @@ func (s *Service) Shutdown() {
 	}
 	wg.Wait()
 	s.runners.Wait()
+	// review rounds end with the service (their revust gets SIGTERM)
+	s.mu.Lock()
+	for _, l := range s.sessions {
+		if l.reviewCancel != nil {
+			l.reviewCancel()
+		}
+	}
+	s.mu.Unlock()
+	s.reviews.Wait()
 	s.mu.Lock()
 	for k, f := range s.owners {
 		f.Close()
@@ -1291,6 +1345,10 @@ func (s *Service) setState(l *live, st, errText string) {
 
 func (s *Service) setStateLocked(l *live, st, errText string) {
 	s.mu.Lock()
+	if l.s.State == StateAccepted && st != StateAccepted {
+		s.mu.Unlock()
+		return // accepted is the end: a late callback does not undo it
+	}
 	l.s.State = st
 	if errText != "" {
 		l.s.Error = errText
@@ -1360,6 +1418,14 @@ func (s *Service) complete(l *live) {
 	l.stmu.Lock()
 	defer l.stmu.Unlock()
 	s.mu.Lock()
+	l.completing = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		l.completing = false
+		s.mu.Unlock()
+	}()
+	s.mu.Lock()
 	l.s.State = StateComplete
 	sid, name := l.s.ID, l.s.Harness
 	s.mu.Unlock()
@@ -1373,7 +1439,9 @@ func (s *Service) complete(l *live) {
 	})
 	if err != nil && !errors.Is(err, errNotOurs) {
 		s.addActivity(l, Activity{Type: ActError, Text: "not moved to review: " + err.Error()})
+		return
 	}
+	s.afterComplete(l) // a review round, or acceptance: decided before Accept can look
 }
 
 // openAsk registers an ask, marks the session waiting and only then makes

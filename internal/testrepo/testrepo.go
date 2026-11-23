@@ -146,6 +146,7 @@ type Task struct {
 	NeedsPerson                                          bool
 	AfterRelease                                         string
 	Extra                                                string // raw YAML lines appended to the front matter
+	Reviews                                              string // the reviews value; default {spec: 0, code: 2}
 	Body                                                 string
 }
 
@@ -182,7 +183,10 @@ func TaskFile(t Task) string {
 	for _, p := range t.Touches {
 		fmt.Fprintf(&b, "  - %q\n", p)
 	}
-	fmt.Fprintf(&b, "harness: %s\nreviews: {spec: 0, code: 2}\ncreated: %q\n", t.Harness, t.Created)
+	if t.Reviews == "" {
+		t.Reviews = "{spec: 0, code: 2}"
+	}
+	fmt.Fprintf(&b, "harness: %s\nreviews: %s\ncreated: %q\n", t.Harness, t.Reviews, t.Created)
 	if t.NeedsPerson {
 		b.WriteString("needs_person: true\n")
 	}

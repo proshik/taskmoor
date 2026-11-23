@@ -286,6 +286,7 @@ func (s *Service) Handover(ctx context.Context, id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	s.stopReview(l) // a review of this session does not outlive it
 	s.mu.Lock()
 	if l.s.State == StateHandedOver && !l.s.HandoverPending {
 		cmd := l.s.Resume

@@ -669,6 +669,123 @@ func (r runner) answerCmd(ctx context.Context, args []string) int {
 	return ExitOK
 }
 
+// acceptanceCmd shows what Accept would merge (A8).
+func (r runner) acceptanceCmd(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("acceptance", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "")
+	diff := fs.Bool("diff", false, "")
+	pos, err := parse(fs, args)
+	if err == nil && len(pos) != 1 {
+		err = usagef("acceptance takes one session or task id")
+	}
+	if err != nil {
+		return r.fail(err, *asJSON)
+	}
+	c, err := r.scopedClient(ctx)
+	if err != nil {
+		return r.fail(err, *asJSON)
+	}
+	a, err := c.Acceptance(ctx, pos[0])
+	if err != nil {
+		return r.serviceFail(err, *asJSON)
+	}
+	if *asJSON {
+		_ = writeJSON(r.env.Stdout, map[string]any{"format": 1, "acceptance": a})
+		return ExitOK
+	}
+	w := r.env.Stdout
+	fmt.Fprintf(w, "%s · %s · branch %s, base %s\n", a.Session.Task, text.Line(a.Session.Title), a.Session.Branch, short(a.Base))
+	fmt.Fprintf(w, "\ncommits:\n")
+	for _, cm := range a.Commits {
+		fmt.Fprintf(w, "  %s\n", text.Line(cm))
+	}
+	fmt.Fprintf(w, "\n%s\n", text.Block(a.Stat))
+	if a.Dirty != "" {
+		fmt.Fprintf(w, "\nuncommitted in the worktree (not merged):\n%s\n", text.Block(a.Dirty))
+	}
+	if rv := a.Review; rv != nil {
+		fmt.Fprintf(w, "\nreview: %d of %d round(s), %s", rv.Done, rv.Rounds, rv.State)
+		if rv.Partial != "" {
+			fmt.Fprintf(w, " (partial: %s)", rv.Partial)
+		}
+		if rv.Tip != "" {
+			fmt.Fprintf(w, ", of %s", short(rv.Tip))
+		}
+		if rv.Unreviewed {
+			fmt.Fprint(w, " (the last findings' fixes are not reviewed again)")
+		}
+		if rv.Error != "" {
+			fmt.Fprintf(w, ": %s", text.Line(rv.Error))
+		}
+		fmt.Fprintln(w)
+		if rv.Archive != "" {
+			fmt.Fprintf(w, "  revust view --archive %s\n", rv.Archive)
+		}
+	} else {
+		fmt.Fprintln(w, "\nreview: none (reviews.code is 0)")
+	}
+	if a.Checks != "" {
+		fmt.Fprintf(w, "\nchecks:\n%s\n", text.Block(a.Checks))
+	}
+	if a.Result != "" {
+		fmt.Fprintf(w, "\nthe agent's summary:\n%s\n", text.Block(a.Result))
+	}
+	if *diff {
+		fmt.Fprintf(w, "\n%s\n", text.Block(a.Diff))
+		if a.DiffCut {
+			fmt.Fprintf(w, "\n(the diff is cut at 256 KiB: see it whole with git diff %s %s in %s)\n", short(a.Base), short(a.Tip), a.Session.Worktree)
+		}
+	} else if a.DiffCut {
+		fmt.Fprintln(w, "\n(the diff is longer than 256 KiB: --diff shows the first part)")
+	}
+	if a.Ready {
+		fmt.Fprintf(w, "\nready: taskmoor accept %s --tip %s merges exactly this into %s (push stays yours)\n", a.Session.Task, short(a.Tip), a.MainBranch)
+	} else {
+		fmt.Fprintf(w, "\nnot ready: %s\n", text.Line(a.Why))
+	}
+	return ExitOK
+}
+
+// acceptCmd is Accept (A8): of the commit the person looked at, named by
+// --tip as `taskmoor acceptance` prints it.
+func (r runner) acceptCmd(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("accept", flag.ContinueOnError)
+	tip := fs.String("tip", "", "")
+	pos, err := parse(fs, args)
+	if err == nil && (len(pos) != 1 || *tip == "") {
+		err = usagef("accept takes one session or task id and --tip COMMIT (taskmoor acceptance ID shows both)")
+	}
+	if err != nil {
+		return r.usageErr(err)
+	}
+	c, err := r.scopedClient(ctx)
+	if err != nil {
+		return r.fail(err, false)
+	}
+	a, err := c.Acceptance(ctx, pos[0])
+	if err != nil {
+		return r.serviceFail(err, false)
+	}
+	if !strings.HasPrefix(a.Tip, *tip) || len(*tip) < 7 {
+		fmt.Fprintf(r.env.Stderr, "taskmoor: %s is at %s now, not %s: look at it again (taskmoor acceptance %s)\n", a.Session.Branch, short(a.Tip), *tip, pos[0])
+		return ExitProblem
+	}
+	res, err := c.Accept(ctx, pos[0], a.Tip)
+	if err != nil {
+		return r.serviceFail(err, false)
+	}
+	if res.Conflicted {
+		where := "conflicts"
+		if len(res.Conflicts) > 0 {
+			where += " in " + strings.Join(res.Conflicts, ", ")
+		}
+		fmt.Fprintf(r.env.Stdout, "%s: %s with %s: sent back to its session to merge %s into its branch\n", res.Session.Task, where, a.MainBranch, a.MainBranch)
+		return ExitProblem
+	}
+	fmt.Fprintf(r.env.Stdout, "%s merged into %s as %s; push is yours. The worktree and the branch stay.\n", res.Session.Task, a.MainBranch, short(res.Merged))
+	return ExitOK
+}
+
 // decisionsCmd lists the dispatcher's decisions (C3).
 func (r runner) decisionsCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("decisions", flag.ContinueOnError)

@@ -108,11 +108,36 @@ func writeJSONFile(p string, v any) error {
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+	return writeAtomic(p, append(data, '\n'))
+}
+
+// writeAtomic writes p through a temporary file of its own: two writers
+// never share one (a shared name could leave one's tail in the other's).
+func writeAtomic(p string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(p), "."+filepath.Base(p)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	tmp := f.Name()
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // Handler is the API: every request needs the token and a loopback Host
@@ -135,6 +160,35 @@ func (s *Service) Handler(token string, port int) http.Handler {
 	mux.HandleFunc("POST /api/sessions/{id}/handover", s.hHandover)
 	mux.HandleFunc("POST /api/sessions/{id}/restart", s.hRestart)
 	mux.HandleFunc("POST /api/projects/{project}/keep", s.hKeep)
+	mux.HandleFunc("GET /api/sessions/{id}/acceptance", func(w http.ResponseWriter, r *http.Request) {
+		id, err := s.SessionID(r.PathValue("id"), r.URL.Query().Get("project"))
+		var a *Acceptance
+		if err == nil {
+			a, err = s.Acceptance(r.Context(), id)
+		}
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, a)
+	})
+	mux.HandleFunc("POST /api/sessions/{id}/accept", func(w http.ResponseWriter, r *http.Request) {
+		id, err := s.SessionID(r.PathValue("id"), r.URL.Query().Get("project"))
+		var res *AcceptResult
+		if err == nil {
+			var body struct {
+				Tip string `json:"tip"`
+			}
+			if err = decode(r, &body); err == nil {
+				res, err = s.Accept(context.WithoutCancel(r.Context()), id, body.Tip)
+			}
+		}
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	})
 	mux.HandleFunc("GET /api/decisions", func(w http.ResponseWriter, r *http.Request) {
 		ds, err := s.Decisions(0) // all: every override id stays findable
 		if err != nil {

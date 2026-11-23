@@ -60,6 +60,10 @@ type Config struct {
 	// DispatcherProfile is the claude profile of the dispatcher's short
 	// call (A13); empty: the dispatcher is off, the person answers all.
 	DispatcherProfile string `toml:"dispatcher_profile,omitempty"`
+	// ReviewCommand and ReviewProfile run the code review (A5): revust
+	// and its codex-only profile unless set.
+	ReviewCommand string `toml:"review_command,omitempty"`
+	ReviewProfile string `toml:"review_profile,omitempty"`
 }
 
 // Project is a registered repository.

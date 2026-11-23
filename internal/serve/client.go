@@ -200,6 +200,21 @@ func (c *Client) Restart(ctx context.Context, id, profile string) (*Session, err
 	return out.Session, nil
 }
 
+// Acceptance is a session's acceptance view.
+func (c *Client) Acceptance(ctx context.Context, id string) (*Acceptance, error) {
+	var out Acceptance
+	err := c.do(ctx, http.MethodGet, c.sessionPath(id, "acceptance"), nil, &out)
+	return &out, err
+}
+
+// Accept merges a session's branch into main (A8): tip is the commit the
+// person looked at ("" takes the branch as it is).
+func (c *Client) Accept(ctx context.Context, id, tip string) (*AcceptResult, error) {
+	var out AcceptResult
+	err := c.do(ctx, http.MethodPost, c.sessionPath(id, "accept"), map[string]any{"tip": tip}, &out)
+	return &out, err
+}
+
 // Decisions lists the dispatcher's decisions, newest first.
 func (c *Client) Decisions(ctx context.Context) ([]Ruling, error) {
 	var out []Ruling

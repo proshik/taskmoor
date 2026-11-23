@@ -25,6 +25,33 @@ var (
 	fakeErr  error
 )
 
+var (
+	revustOnce sync.Once
+	revustPath string
+	revustErr  error
+)
+
+// fakeRevust builds testdata/fakerevust once.
+func fakeRevust(t *testing.T) string {
+	t.Helper()
+	revustOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "taskmoor-fakerevust-")
+		if err != nil {
+			revustErr = err
+			return
+		}
+		revustPath = filepath.Join(dir, "revust")
+		out, err := exec.Command("go", "build", "-o", revustPath, "./testdata/fakerevust").CombinedOutput()
+		if err != nil {
+			revustErr = fmt.Errorf("%v: %s", err, out)
+		}
+	})
+	if revustErr != nil {
+		t.Fatal(revustErr)
+	}
+	return revustPath
+}
+
 // fake builds testdata/fakeclaude once.
 func fake(t *testing.T) string {
 	t.Helper()
@@ -93,6 +120,9 @@ func startWith(t *testing.T, repo *testrepo.Repo, scenario string, mod func(*ser
 	cfg := &serve.Config{Port: freePort(t), DefaultProfile: "fake",
 		Profiles: []serve.Profile{{Name: "fake", Harness: "claude", Command: fake(t)}, {Name: "codexy", Harness: "codex", Command: "/nonexistent/codex-acp"}},
 		Projects: []serve.Project{{Name: "repo", Path: repo.Dir}}}
+	// the review never reaches the real revust (a task's reviews.code is 2
+	// in testrepo): FAKE_REVUST decides each round, clean by default
+	cfg.ReviewCommand = fakeRevust(t)
 	if mod != nil {
 		mod(cfg)
 	}

@@ -130,6 +130,33 @@ model = "provider/model"
   automatic start whose agent fails after the claim (no answer from the
   agent, a refused sign-in) leaves the task claimed with the session in
   error and its slot free: Restart it with a profile, or Release it.
+- **Review and acceptance (stage 5).** When a session's turn ends, the
+  task (`review`) gets `min(reviews.code, 2)` code-review rounds by
+  revust (`review_command`, default
+  `revust` on `PATH`; `review_profile`, default `codex-only`; its archives
+  in the service store, never in the worktree). Each round's findings go
+  back into the same session; it fixes, finishes, and the next round
+  runs; the fixes after the last round are marked unreviewed. `reviews.code:
+  0` skips review. `taskmoor acceptance ID [--diff]` (or the card's
+  Acceptance) shows the commits, the diff against the merge base, what is
+  uncommitted in the worktree, the task's Checks, the agent's summary and
+  the review; `taskmoor accept ID` (Accept) merges:
+  - a trial merge first (`git merge-tree`, which writes no worktree): a
+    conflict sends the task back to its session to merge main into its
+    branch;
+  - then, in your checkout, which must be on the project's main branch
+    (taskmoor never switches it): the merge commit is made from the
+    trial's tree with `Task: <ID>` (`git commit-tree`, so no merge option,
+    strategy or hook of your config changes it), your files move with
+    `git read-tree -m -u` (it refuses when your changes are in the way),
+    and main moves only from the commit that was checked; any path the
+    merge writes that is untracked or ignored in your checkout refuses
+    Accept beforehand (git itself would overwrite ignored files); nothing
+    runs while your checkout is in a merge, rebase, cherry-pick or revert;
+    `taskmoor accept ID --tip C` merges only the commit C you looked at;
+  - the task is `merged`, its state file goes; the worktree and the branch
+    stay for you. **Push stays yours.** Send back (or `taskmoor say`)
+    returns it to the session with an instruction.
 - **The dispatcher (stage 4).** With `dispatcher_profile = "NAME"` (a
   claude profile; a cheap model is enough) in the config, an agent's
   question is first looked at by the dispatcher (C3):

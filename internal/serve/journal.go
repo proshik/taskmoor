@@ -69,6 +69,9 @@ type Session struct {
 	RestartedAs string `json:"restarted_as,omitempty"`
 	// Abandoned: a Restart's successor that never got the claim.
 	Abandoned bool `json:"abandoned,omitempty"`
+	// Review is the code review (A5); Merged the merge commit of Accept.
+	Review *Review `json:"review,omitempty"`
+	Merged string  `json:"merged,omitempty"`
 	// ProjectPath is the registered repository the session belongs to: a
 	// project name reused for another repository does not inherit it.
 	ProjectPath string `json:"project_path,omitempty"`
@@ -91,9 +94,10 @@ type Activity struct {
 // journal stores sessions: <store>/sessions/<id>.json (the session record,
 // replaced whole) and <id>.jsonl (the activities, appended).
 type journal struct {
-	dir string
-	mu  sync.Mutex
-	seq map[string]int // session → the last activity number written
+	dir    string
+	mu     sync.Mutex
+	saveMu sync.Mutex     // session records are written one at a time, in order
+	seq    map[string]int // session → the last activity number written
 }
 
 func newJournal(store string) (*journal, error) {
@@ -105,16 +109,13 @@ func newJournal(store string) (*journal, error) {
 }
 
 func (j *journal) saveSession(s *Session) error {
+	j.saveMu.Lock() // saves land in the order they are made
+	defer j.saveMu.Unlock()
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	p := filepath.Join(j.dir, s.ID+".json")
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	return writeAtomic(filepath.Join(j.dir, s.ID+".json"), append(data, '\n'))
 }
 
 // remove deletes a session's record and feed (a Run that did not start).

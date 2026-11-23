@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-23; stages 1, 2, 2b, 3 and 4 are implemented.**
+2026-11-23; stages 1, 2, 2b, 3, 4 and 5 are implemented.**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -273,8 +273,9 @@ dispatcher"; level (c) and the person's approvals go to the **inbox** and to
    Findings go back into the same session as a prompt; the agent fixes; at
    most **2 code-review rounds** counting the first. After that the task
    comes to the person whatever the result.
-3. **Acceptance view:** the diff against the base, the checks the agent ran
-   and their results, the review result. **Accept** merges the branch into
+3. **Acceptance view:** the diff against the base, the task's Checks and
+   the agent's own summary of what it ran (taskmoor does not run the
+   checks itself), the review result. **Accept** merges the branch into
    the local main with the `Task: <ID>` trailer in the merge commit (the
    format's merge rule), after a trial merge that leaves the person's
    checkout untouched on conflict (A8). Push stays the person's.
@@ -1169,6 +1170,124 @@ The smallest loop that runs a real agent on a real task.
   result); **Accept** with the trial merge and the real merge of A8 and the
   `Task: <ID>` trailer; send back / release (A7, A6). Push stays the
   person's.
+
+#### Stage 5 — implementation decisions (2026-11-23)
+
+1. **When review runs.** After a session's turn completes and the task is
+   moved to `review`; one round at a time across the service. A failed
+   round counts (as for revust's own limits); the person can still
+   Accept or send back.
+2. **revust headless.** `revust new` then `revust --task T --run rN
+   --profile <review_profile> --no-tui --tasks-dir <store>/reviews
+   --workdir <worktree>`: the archives are the service's, an agent cannot
+   commit or edit them. The scope names the branch, the merge base with
+   main and the task file as the contract; the goal is the task's body.
+   Exit 0 clean, 1 findings (`revust view --markdown`, the Active
+   findings part, at most 24 KiB), anything else an error. 90 minutes at
+   most; Stop, Release, Restart and Continue in terminal stop a round.
+3. **Findings back** with Say: the instruction to check each finding,
+   fix what is right (with a test where it fits), say why for what is
+   not, commit and finish. After the last round's findings the fixes are
+   not reviewed again (`unreviewed`), as in the person's own workflow.
+4. **Acceptance view:** commits and diff (256 KiB) against the merge
+   base of `refs/heads/main` and the branch, `git status` of the worktree
+   (uncommitted work is not merged and is shown), the task's Checks, the
+   agent's last summary, the review. Ready only in `review`, with the
+   claim the session's, no turn and no review running.
+5. **Accept (A8)** as specified; the merge commit is `Merge <branch>:
+   <title>` with the `Task: <ID>` trailer; the person's checkout must be
+   on main (refused otherwise); one merge at a time. After the merge the
+   state file is removed (the derivation says `merged`; a kept file
+   would be stale at once), the session is `accepted` with the merge
+   commit; worktree and branch stay.
+7. **Real check** (2026-11-23, sessions on Codex, review by the real
+   revust `codex-only`): AT-001 (`reviews.code: 1`): Codex wrote and
+   committed `greet.sh`, the review round ran in 1.5 minutes and was
+   clean, the board's acceptance view showed it ready, `taskmoor accept`
+   made `Merge task/AT-001-greet: Add a greet script` with `Task: AT-001`
+   on main's first-parent history and the board moved the task to Done
+   (the project's release rule is `merge`). The check found the view
+   printing nested lists as text; fixed and seen again on AT-002.
+6. **Send back** is Say from the acceptance view, prefixed "Sent back from
+   acceptance:". The confirmation on the Mac itself for dangerous
+   approvals (A9, A11) is not needed here yet: the board and the CLI are
+   local; it comes with remote clients.
+8. **Review r1 (23 findings, all confirmed), fixed:** Accept merges the
+   commit the person saw (the view's `tip`; a branch that moved is
+   refused) and the trial and the merge use the same two commits; nothing
+   runs while the person's checkout is in a merge, rebase, cherry-pick or
+   revert (their merge is never aborted: only one this call started is);
+   a path the merge writes that exists untracked or ignored in the
+   checkout refuses it (git's ort strategy overwrites ignored files
+   whatever `--no-overwrite-ignore` says); `--commit --no-squash --no-log`
+   keep the person's `merge.log` and `mergeOptions` from skipping the
+   commit or burying the trailer; branch commits already in main are
+   "nothing to merge"; after the merge HEAD, the parents and the trailer
+   (read by `git interpret-trailers`) are checked before the claim goes;
+   the session is held during Accept (no Say, Release, Restart or
+   handover); a task the derivation already calls merged is not accepted
+   again; the trial runs through gitx (an inherited `GIT_DIR` is
+   dropped); a conflict without named paths is reported as one; a late
+   exit does not overwrite `accepted`; Accept waits while a review is due
+   or its findings are on their way; a review waiting for its slot is
+   cancellable and re-checks the session before it runs; a service
+   restart turns a running round into an error; Restart carries the
+   review budget; the review names the branch's commit, not the
+   worktree's HEAD; the review record is copied on write; a stop sends
+   revust SIGTERM (it cleans up its providers), then kills after 30 s;
+   a clean round with fewer sources than run is marked partial; the diff
+   is read with a limit; the board copes with no commits; the CLI says
+   when the diff is cut; this guide no longer promises check results.
+9. **Found after r1 by the tests:** Shutdown did not end review rounds,
+   which went on starting revust after the service had stopped (and a
+   process forked at that moment held the store lock for a while); now
+   Shutdown cancels and joins them, and none starts while it stops.
+   Real check after r1: AT-003 on Codex, a clean revust round of the
+   named commit, `taskmoor accept` showing the commit it merges, the
+   merge with `Task: AT-003`.
+10. **Review r2 (24 findings, the last round), fixed — Accept no longer
+    runs `git merge`.** The checks on this Mac showed that both `git
+    merge` (ort, whatever `--no-overwrite-ignore` says) and `git
+    read-tree -m -u` overwrite ignored files. Accept now: makes the merge
+    commit itself from the trial's tree (`git commit-tree`, parents main's
+    checked tip and the task commit, the exact message: no strategy,
+    merge option, `merge.log` or hook of the person's config is
+    involved); checks every path the merge writes, its parent
+    directories and the contents of a directory it replaces against the
+    list of files tracked at main's tip (no pathspecs), and refuses on
+    anything untracked or ignored in the way; moves the person's index
+    and files with `git read-tree -m -u` (it refuses when their changes
+    are in the way); moves main with `git update-ref` only from the
+    checked tip (compare and swap; the files go back if that fails); never
+    aborts anything; reads the trailer exactly. Also: Release is refused
+    while Accept holds the session; Shutdown waits for an Accept under way
+    and Accept refuses while it stops; the acceptance view uses one commit
+    of the branch throughout and names the project's main branch; Accept
+    needs the commit the person saw (`--tip` in the CLI, the view's tip on
+    the board); an accepted session stays accepted whatever a late
+    callback writes; the review decision is made before Accept can look
+    (a completion holds Accept until its review is started or not); a
+    clean review of an older commit does not cover a newer one while the
+    budget lasts; Restart checks the successor before it touches the
+    review, then lets a running round end and counts it before the budget
+    moves; Open gives a completed session the review it is owed and marks
+    findings saved but not delivered; a round never clears the next
+    round's cancellation; `revust view` runs under the round's context,
+    bounded, and an unreadable report is an error, never clean; a
+    reported partial outcome is marked; each round has an archive name of
+    its own; Stop stops a review that runs without an agent; session
+    records are written one at a time through temporary files of their
+    own (two writers could leave one's tail in the other's file).
+    Recorded, not fixed: a merge commit made by `commit-tree` runs no
+    commit hooks and is signed only if the person's config signs
+    `commit-tree` commits.
+11. **Real check after r2:** AT-004 on Codex. Codex stalled once on its
+    model call (no events for minutes; Accept refused meanwhile, "the
+    agent is still working"); after a service restart and Say it
+    finished, the real revust round was clean, `taskmoor accept AT-004
+    --tip a4227417` made the merge (parents main's tip and a4227417,
+    `Task: AT-004`), the file appeared in the checkout, an untracked
+    `notes.local` there stayed untouched, the task became done.
 
 ### Stage 6 — guards and power
 
