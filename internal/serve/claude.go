@@ -252,20 +252,35 @@ func startClaude(s claudeStart, host claudeHost) (*claudeRunner, error) {
 	if err != nil {
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
+	// stdout through a pipe of our own: a helper that keeps it open after
+	// claude exits cannot hold the exit (and the Mac awake)
+	pr, pw, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
+	cmd.Stdout = pw
+	cmd.WaitDelay = 2 * time.Second
 	var stderr strings.Builder
 	cmd.Stderr = &limitedWriter{w: &stderr, n: 16 << 10}
 	if err := cmd.Start(); err != nil {
+		pr.Close()
+		pw.Close()
 		return nil, fmt.Errorf("start %s: %w", prog, err)
 	}
+	pw.Close()
 	r := &claudeRunner{cmd: cmd, stdin: stdin, host: host, done: make(chan struct{})}
 	host.bind(r)
+	readDone := make(chan struct{})
+	go func() { r.read(pr); close(readDone) }()
 	go func() {
-		r.read(stdout)
 		err := cmd.Wait()
+		select {
+		case <-readDone:
+		case <-time.After(2 * time.Second):
+			pr.Close()
+			<-readDone
+		}
+		pr.Close()
 		code := -1
 		if cmd.ProcessState != nil {
 			code = cmd.ProcessState.ExitCode()

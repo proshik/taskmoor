@@ -64,6 +64,10 @@ type Config struct {
 	// and its codex-only profile unless set.
 	ReviewCommand string `toml:"review_command,omitempty"`
 	ReviewProfile string `toml:"review_profile,omitempty"`
+	// UsageThreshold is the plan's share left (percent) below which new
+	// automatic starts wait and manual ones need --anyway (default 10;
+	// 0 turns the guard off).
+	UsageThreshold *int `toml:"usage_threshold,omitempty"`
 }
 
 // Project is a registered repository.

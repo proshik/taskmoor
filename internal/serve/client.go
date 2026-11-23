@@ -153,9 +153,18 @@ func (c *Client) Stop(ctx context.Context, id string) (*Session, error) {
 }
 
 // Say sends an instruction.
-func (c *Client) Say(ctx context.Context, id, text string) (*Session, error) {
+func (c *Client) Say(ctx context.Context, id, text string, anyway ...bool) (*Session, error) {
 	var s Session
-	return &s, c.do(ctx, http.MethodPost, c.sessionPath(id, "say"), map[string]string{"text": text}, &s)
+	return &s, c.do(ctx, http.MethodPost, c.sessionPath(id, "say"), map[string]any{"text": text, "anyway": len(anyway) > 0 && anyway[0]}, &s)
+}
+
+// Usage is each subscription plan's share left, as the service last read it.
+func (c *Client) Usage(ctx context.Context) ([]Usage, int, bool, error) {
+	snap, err := c.Snapshot(ctx)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	return snap.Usage, snap.Threshold, snap.AgentsRunning, nil
 }
 
 // Release hands a task back: the session stops and the state file goes.
@@ -186,12 +195,12 @@ func (c *Client) Handover(ctx context.Context, id string) (*Session, string, err
 
 // Restart restarts a session with another profile (A24); the new session
 // is returned, also when its start failed (err says why).
-func (c *Client) Restart(ctx context.Context, id, profile string) (*Session, error) {
+func (c *Client) Restart(ctx context.Context, id, profile string, anyway ...bool) (*Session, error) {
 	var out struct {
 		Session *Session `json:"session"`
 		Error   string   `json:"error"`
 	}
-	if err := c.do(ctx, http.MethodPost, c.sessionPath(id, "restart"), map[string]any{"profile": profile}, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, c.sessionPath(id, "restart"), map[string]any{"profile": profile, "anyway": len(anyway) > 0 && anyway[0]}, &out); err != nil {
 		return nil, err
 	}
 	if out.Error != "" {

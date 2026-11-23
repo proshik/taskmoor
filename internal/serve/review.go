@@ -39,6 +39,7 @@ type Review struct {
 	Tip        string `json:"tip,omitempty"`
 	Partial    string `json:"partial,omitempty"`
 	SendFailed bool   `json:"send_failed,omitempty"`
+	SendError  string `json:"send_error,omitempty"`
 }
 
 // ReviewTimeout bounds one review round.
@@ -68,6 +69,10 @@ func (s *Service) afterComplete(l *live) {
 	tipOut, _ := gitx.Repo{Dir: l.s.Worktree}.Run(context.Background(), "rev-parse", "refs/heads/"+l.s.Branch)
 	tip := strings.TrimSpace(string(tipOut))
 	s.mu.Lock()
+	if l.s.State != StateComplete || l.runner != nil && !l.runner.inputClosed() || l.starting {
+		s.mu.Unlock()
+		return // the session went on meanwhile: its next completion decides
+	}
 	// copy on write: snapshots and events hold the old value whole
 	var rv Review
 	if l.s.Review != nil {
@@ -81,6 +86,14 @@ func (s *Service) afterComplete(l *live) {
 	// a round is due while the budget lasts and the branch's commit has no
 	// clean review yet (a clean one of an older commit does not cover it)
 	start := rv.State != "running" && rv.Done < rv.Rounds && !(rv.State == "clean" && rv.Tip == tip) && !s.closing
+	if start {
+		// revust's codex-only profile runs on Codex's plan: a low plan
+		// postpones the round (it is not counted)
+		if err := s.reviewGuard(); err != nil {
+			start = false
+			rv.State, rv.Error = "error", "postponed: "+err.Error()
+		}
+	}
 	if !start && rv.State == "findings" {
 		rv.Unreviewed = true // the last findings' fixes are not reviewed again
 	}
@@ -132,6 +145,23 @@ func (s *Service) reviewRound(ctx context.Context, cancel context.CancelFunc, ge
 		return
 	}
 	defer func() { <-s.reviewSem }()
+	// the session may have gone on while the round waited
+	s.mu.Lock()
+	working := l.s.State != StateComplete || l.runner != nil && !l.runner.inputClosed() || l.starting
+	s.mu.Unlock()
+	if working {
+		s.setReview(l, func(r *Review) {
+			r.State, r.Error = "error", "the session went on before the review ran: its next completion decides"
+		})
+		s.saveAndPublish(l)
+		return
+	}
+	// the plan may have gone low while the round waited for its slot
+	if err := s.reviewGuard(); err != nil {
+		s.setReview(l, func(r *Review) { r.State, r.Error = "error", "postponed: "+err.Error() })
+		s.saveAndPublish(l)
+		return
+	}
 	// the session may have moved on while the round waited
 	s.mu.Lock()
 	gone := l.s.State == StateStopped || l.s.State == StateHandedOver || l.s.RestartedAs != "" || l.s.State == StateAccepted
@@ -144,7 +174,14 @@ func (s *Service) reviewRound(ctx context.Context, cancel context.CancelFunc, ge
 	rv0 := s.setReview(l, func(*Review) {})
 	round := rv0.Done + 1
 	s.addActivity(l, Activity{Type: ActAction, Tool: "review", Text: fmt.Sprintf("code review round %d of %d (revust)", round, rv0.Rounds)})
+	s.agentUp() // revust's agents are agents too: the Mac stays awake (A19)
 	res := s.runRevust(ctx, l, t, round, rv0.Rounds)
+	s.agentDown()
+	if res.state == "postponed" { // not run, not counted
+		s.setReview(l, func(r *Review) { r.State, r.Error = "error", "postponed: "+res.err })
+		s.saveAndPublish(l)
+		return
+	}
 	rv := s.setReview(l, func(r *Review) {
 		r.Done = round
 		r.State, r.Findings, r.Archive, r.Report, r.Error, r.Tip, r.Partial = res.state, res.findings, res.archive, res.report, res.err, res.tip, res.partial
@@ -172,8 +209,9 @@ func (s *Service) reviewRound(ctx context.Context, cancel context.CancelFunc, ge
 		msg := fmt.Sprintf("Code review round %d of %d found the issues below. Check each against the code; fix what is right "+
 			"(with a test where it fits), say briefly why for what is not, commit on the branch, and finish with a short summary.\n\n%s",
 			round, rv.Rounds, res.report)
-		if err := s.Say(context.Background(), l.s.ID, msg); err != nil {
-			s.setReview(l, func(r *Review) { r.SendFailed = true })
+		// the findings resume the agent: an automatic start (it waits on a low plan)
+		if err := s.say(context.Background(), l.s.ID, msg, true, false); err != nil {
+			s.setReview(l, func(r *Review) { r.SendFailed, r.SendError = true, err.Error() })
 			s.saveAndPublish(l)
 			s.addActivity(l, Activity{Type: ActError, Text: "the review's findings did not reach the session: " + err.Error()})
 		}
@@ -252,6 +290,10 @@ func (s *Service) runRevust(ctx context.Context, l *live, t app.TaskView, round,
 		return revustResult{state: "error", err: err.Error()}
 	}
 	_ = os.WriteFile(filepath.Join(paths.InputDir, "goal.md"), []byte(t.Task.Body), 0o600)
+	// the plan, once more, right before the providers start
+	if err := s.reviewGuard(); err != nil {
+		return revustResult{state: "postponed", err: err.Error()}
+	}
 	cmd := exec.CommandContext(ctx, path, "--task", task, "--run", run, "--profile", profile, "--no-tui",
 		"--tasks-dir", dir, "--workdir", l.s.Worktree)
 	cmd.Dir = dir
@@ -342,4 +384,39 @@ func (s *Service) reviewRunning(l *live) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return l.s.Review != nil && l.s.Review.State == "running"
+}
+
+// reviewGuard is the usage guard of an automatic review round: on the
+// plans of revust's review profile.
+func (s *Service) reviewGuard() error {
+	cfg, err := s.Config()
+	if err != nil {
+		return nil
+	}
+	for _, h := range reviewHarnesses(cfg) {
+		if err := s.guardPlan(h, true, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resendFindings delivers findings a low plan kept from the session.
+func (s *Service) resendFindings(l *live) {
+	s.mu.Lock()
+	rv := l.s.Review
+	s.mu.Unlock()
+	if rv == nil || rv.Report == "" {
+		return
+	}
+	msg := fmt.Sprintf("Code review round %d of %d found the issues below. Check each against the code; fix what is right "+
+		"(with a test where it fits), say briefly why for what is not, commit on the branch, and finish with a short summary.\n\n%s",
+		rv.Done, rv.Rounds, rv.Report)
+	if err := s.say(context.Background(), l.s.ID, msg, true, false); err != nil {
+		s.setReview(l, func(r *Review) { r.SendError = err.Error() })
+		return
+	}
+	s.setReview(l, func(r *Review) { r.SendFailed, r.SendError = false, "" })
+	s.saveAndPublish(l)
+	s.addActivity(l, Activity{Type: ActResult, Tool: "review", Text: fmt.Sprintf("review round %d: the findings went to the session now that the plan allows it", rv.Done)})
 }

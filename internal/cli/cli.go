@@ -60,7 +60,7 @@ const usage = `usage:
 The service (taskmoor serve) and its clients:
   taskmoor serve                                       run the service (127.0.0.1, foreground)
   taskmoor project add PATH [--name N] | list | remove NAME
-  taskmoor run ID [--project P] [--profile NAME] [--person] [--json]
+  taskmoor run ID [--project P] [--profile NAME] [--person] [--anyway] [--json]
   taskmoor sessions [--json]                           the service's sessions
   taskmoor feed ID [--follow] [--json]                 a session's feed (ID: session or task)
   taskmoor inbox [--json]                              questions and approvals waiting for you
@@ -71,6 +71,7 @@ The service (taskmoor serve) and its clients:
   taskmoor restart ID --profile NAME                   a new session of another profile on the same claim and worktree
   taskmoor keep N [--project P]                        keep N sessions busy with ready tasks (0: off)
   taskmoor decisions [--json]                          what the dispatcher answered, and why
+  taskmoor usage [--json]                              each plan's share left and the start guard
   taskmoor acceptance ID [--diff] [--json]             the work to accept: commits, diff, review, checks
   taskmoor accept ID                                   merge the task's branch into main (trial merge first)
   taskmoor override DECISION N [N…] | --text T          replace a dispatcher answer (sent to the session)
@@ -149,6 +150,8 @@ func Run(ctx context.Context, args []string, env Env) int {
 		return r.keepCmd(ctx, rest)
 	case "decisions":
 		return r.decisionsCmd(ctx, rest)
+	case "usage":
+		return r.usageCmd(ctx, rest)
 	case "acceptance":
 		return r.acceptanceCmd(ctx, rest)
 	case "accept":

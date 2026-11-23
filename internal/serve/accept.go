@@ -294,13 +294,15 @@ func (s *Service) Accept(ctx context.Context, id, tip string) (*AcceptResult, er
 		msg := fmt.Sprintf("Accept found that your branch does not merge cleanly into %s: %s. "+
 			"Merge %s into your branch (git merge %s), resolve the conflicts, run the checks again, commit, and finish with a short summary.",
 			l.rules.MainBranch, where, l.rules.MainBranch, l.rules.MainBranch)
-		s.addActivity(l, Activity{Type: ActResponse, Text: "accept: " + where + " with " + l.rules.MainBranch + "; sent back", By: "person"})
 		s.mu.Lock()
 		l.handingOver = false // Say needs the session
 		s.mu.Unlock()
-		if err := s.Say(ctx, l.s.ID, msg); err != nil {
+		// the person's Accept is the confirmation: below the plan's
+		// threshold too (anyway)
+		if err := s.say(ctx, l.s.ID, msg, false, true); err != nil {
 			return nil, fmt.Errorf("the branch does not merge cleanly (%s), and sending it back failed: %w", where, err)
 		}
+		s.addActivity(l, Activity{Type: ActResponse, Text: "accept: " + where + " with " + l.rules.MainBranch + "; sent back", By: "person"})
 		return &AcceptResult{Conflicted: true, Conflicts: files, Session: s.snapshotSession(l.s.ID)}, nil
 	}
 	tree := strings.TrimSpace(strings.SplitN(string(tout), "\n", 2)[0])

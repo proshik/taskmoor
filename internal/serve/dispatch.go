@@ -155,6 +155,10 @@ func (s *Service) dispatch(l *live, a *Ask) {
 		toPerson(fmt.Sprintf("dispatcher_profile %q is not a configured claude profile", cfg.DispatcherProfile))
 		return
 	}
+	if err := s.guard(*prof, true, false); err != nil { // the plan's usage
+		toPerson("the dispatcher waits: " + err.Error())
+		return
+	}
 	// managed Claude settings outrank the call's own: their hooks would see
 	// the question and the documents, their key would bill
 	if f, what := s.managedClaude(); f != "" && !(what == "apiKeyHelper" && prof.APIBilling) {
@@ -177,6 +181,10 @@ func (s *Service) dispatch(l *live, a *Ask) {
 	}
 	tick.Stop()
 	defer func() { <-s.dispatchSem }()
+	if err := s.guard(*prof, true, false); err != nil { // the plan, again, after the wait
+		toPerson("the dispatcher waits: " + err.Error())
+		return
+	}
 	docs := s.guidance(l)
 	if !s.askOpen(a) {
 		return // answered or withdrawn meanwhile: no call
@@ -198,7 +206,13 @@ func (s *Service) dispatch(l *live, a *Ask) {
 			}
 		}
 	}()
+	if err := s.guard(*prof, true, false); err != nil { // the plan, once more, right before the call
+		toPerson("the dispatcher waits: " + err.Error())
+		return
+	}
+	s.agentUp() // the dispatcher's call is an agent too (A19)
 	reply, err := s.consult(ctx, *prof, dispatchPrompt(a, docs))
+	s.agentDown()
 	if !s.askOpen(a) {
 		return // the person answered meanwhile
 	}
@@ -702,7 +716,7 @@ func (s *Service) Override(ctx context.Context, id string, ans Answer) (*Ruling,
 	if err := s.saveDecision(d); err != nil {
 		return nil, fmt.Errorf("the override could not be recorded, nothing was sent: %w", err)
 	}
-	if err := s.Say(ctx, d.Session, msg); err != nil {
+	if err := s.say(ctx, d.Session, msg, false, true); err != nil { // the person's override is the confirmation
 		d.Overridden = prev
 		_ = s.saveDecision(d)
 		return nil, err

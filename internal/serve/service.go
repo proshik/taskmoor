@@ -42,8 +42,14 @@ type Service struct {
 	decMu       sync.Mutex
 	reviewSem   chan struct{}  // one review round at a time
 	reviews     sync.WaitGroup // review rounds under way, joined by Shutdown
-	acceptMu    sync.Mutex     // one merge at a time
-	decCache    []Ruling       // nil: read the store again
+	// UsageClaude and UsageCodex read the plans (stage 6); nil: not read.
+	UsageClaude UsageReader
+	UsageCodex  UsageReader
+	usage       usageState
+	awake       awake
+	pid         int
+	acceptMu    sync.Mutex // one merge at a time
+	decCache    []Ruling   // nil: read the store again
 
 	journal *journal
 	bus     *bus
@@ -202,7 +208,9 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 		keep:        keeper{failed: map[string]time.Time{}, errs: map[string]string{}},
 		dispatchSem: make(chan struct{}, 2),
 		reviewSem:   make(chan struct{}, 1),
-		journal:     j, bus: newBus(), sessions: map[string]*live{}, asks: map[string]*Ask{}, owners: map[string]*os.File{}}
+		UsageClaude: readClaudeUsage, UsageCodex: readCodexUsage, pid: os.Getpid(),
+		usage:   usageState{last: map[string]Usage{}, pause: map[string]time.Time{}},
+		journal: j, bus: newBus(), sessions: map[string]*live{}, asks: map[string]*Ask{}, owners: map[string]*os.File{}}
 	s.auth = newWebAuth(func() time.Time { return s.Now() }, filepath.Join(paths.Store, "web-sessions.json"))
 	old, err := j.sessions()
 	if err != nil {
@@ -384,6 +392,8 @@ type RunRequest struct {
 	Task    string `json:"task"`
 	Profile string `json:"profile,omitempty"`
 	Person  bool   `json:"person,omitempty"`
+	// Anyway starts it although the plan's usage is below the threshold.
+	Anyway bool `json:"anyway,omitempty"`
 	// auto: a "Keep N busy" start, admitted only while the project's N
 	// has room (checked again just before the claim)
 	auto bool
@@ -426,6 +436,9 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*Session, error) {
 		return nil, err
 	}
 	if err := s.preflight(*prof, rep.Snapshot.Root); err != nil {
+		return nil, err
+	}
+	if err := s.guard(*prof, req.auto, req.Anyway); err != nil { // the plan's usage
 		return nil, err
 	}
 
@@ -836,6 +849,14 @@ func (s *Service) Stop(id string) error {
 // Say sends an instruction: to the running process, or by resuming the
 // conversation when it has ended.
 func (s *Service) Say(ctx context.Context, id, text string) error {
+	return s.say(ctx, id, text, false, false)
+}
+
+// say is Say with the usage guard of a resume: auto (the service's own
+// instruction, e.g. review findings) waits below the threshold; a manual
+// one needs anyway there. An instruction to a running agent is not a
+// start and is not guarded.
+func (s *Service) say(ctx context.Context, id, text string, auto, anyway bool) error {
 	if strings.TrimSpace(text) == "" {
 		return refusedf("the instruction is empty")
 	}
@@ -882,6 +903,10 @@ func (s *Service) Say(ctx context.Context, id, text string) error {
 	// a resume runs under the profile as it is now (read while this
 	// launch holds the session, so no runner reads it meanwhile)
 	if err := s.refreshProfile(l); err != nil {
+		s.unreserve(l)
+		return err
+	}
+	if err := s.guard(l.profile, auto, anyway); err != nil { // a resume starts the agent
 		s.unreserve(l)
 		return err
 	}
@@ -1165,6 +1190,12 @@ type Snapshot struct {
 	Projects []ProjectState `json:"projects"`
 	Sessions []Session      `json:"sessions"`
 	Asks     []Ask          `json:"asks"`
+	// Usage is each subscription plan's share left; Threshold the guard's
+	// percent; AgentsRunning: the Mac is held awake for agents (A19).
+	Usage         []Usage `json:"usage"`
+	Threshold     int     `json:"threshold"`
+	AgentsRunning bool    `json:"agents_running"`
+	AwakeError    string  `json:"awake_error,omitempty"`
 	// Decisions are the dispatcher's latest decisions; Dispatcher names its
 	// profile ("" when it is off).
 	Decisions  []Ruling `json:"decisions"`
@@ -1214,7 +1245,8 @@ func (s *Service) Snapshot(ctx context.Context) (*Snapshot, error) {
 		return nil, err
 	}
 	out := &Snapshot{Epoch: epoch, Rev: rev, Profiles: []ProfileView{}, Projects: []ProjectState{}, Sessions: []Session{}, Asks: []Ask{},
-		Dispatcher: cfg.DispatcherProfile}
+		Dispatcher: cfg.DispatcherProfile, Usage: s.Usages(), Threshold: s.threshold()}
+	out.AgentsRunning, out.AwakeError = s.AgentsRunning()
 	// the 30 latest the dispatcher answered: those the person may override
 	out.Decisions = []Ruling{}
 	if ds, err := s.Decisions(0); err == nil {

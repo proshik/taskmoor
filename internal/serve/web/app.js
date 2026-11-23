@@ -309,6 +309,7 @@ function render() {
     document.getElementById("inbox-btn").className = "inbox-btn" + (count ? " has" : "");
     renderBoard();
     renderKeep(currentProject());
+    renderUsage();
     renderPanel();
   });
 }
@@ -476,10 +477,13 @@ function runForm(p, t) {
       // the routed profile is the server's to choose (its current config);
       // a profile is sent only when the person picked one
       const picked = (key + ":profile") in S.drafts || !route.profile;
-      const s = await api("POST", "/api/run", { project: p.name, task: t.id, profile: picked ? select.value : "", person: !!(person && person.checked) });
-      forget(key);
-      await refresh();
-      loadFeed(p.name, t.id, s.id);
+      const go = async (anyway) => {
+        const s = await api("POST", "/api/run", { project: p.name, task: t.id, profile: picked ? select.value : "", person: !!(person && person.checked), anyway });
+        forget(key);
+        await refresh();
+        loadFeed(p.name, t.id, s.id);
+      };
+      try { await go(false); } catch (e) { if (!offerAnyway(err, e, "Run anyway", go)) throw e; run.disabled = false; }
     } catch (e) { err.textContent = e.message; run.disabled = false; }
   } }, "Run");
   select.addEventListener("change", () => { run.disabled = !select.value; });
@@ -532,7 +536,19 @@ function sessionView(sess) {
     mine ? h("div", {}, say, h("div", { class: "actions" }, act("Say", async () => {
       const sent = say.value;
       if (!sent.trim()) return;
-      await api("POST", `/api/sessions/${sid}/say`, { text: sent });
+      const go = (anyway) => api("POST", `/api/sessions/${sid}/say`, { text: sent, anyway });
+      try { await go(false); } catch (e) {
+        if (!offerAnyway(err, e, "Say anyway", async () => {
+          await go(true);
+          // clear only what was sent: a newer draft stays
+          if ((S.drafts[sayKey] ?? sent) === sent) {
+            delete S.drafts[sayKey];
+            const cur = document.querySelector(`[data-draft="${CSS.escape(sayKey)}"]`);
+            if (cur && cur.value === sent) cur.value = "";
+          }
+        })) throw e;
+        return;
+      }
       // clear only what was sent: a newer draft typed meanwhile stays
       if ((S.drafts[sayKey] ?? sent) === sent) {
         delete S.drafts[sayKey];
@@ -591,11 +607,44 @@ function acceptanceView(sess) {
     note,
     h("div", { class: "actions" }, h("button", { type: "button", onclick: async () => {
       if (!note.value.trim()) return;
-      try { await api("POST", `/api/sessions/${encodeURIComponent(sess.id)}/say`, { text: "Sent back from acceptance: " + note.value }); forget(sendKey); delete S.accept[sess.id]; await refresh(); }
-      catch (e) { err.textContent = e.message; }
+      const sentNote = note.value;
+      const text = "Sent back from acceptance: " + sentNote;
+      const go = async (anyway) => {
+        await api("POST", `/api/sessions/${encodeURIComponent(sess.id)}/say`, { text, anyway });
+        if ((S.drafts[sendKey] ?? sentNote) === sentNote) forget(sendKey); // a newer draft stays
+        delete S.accept[sess.id];
+        await refresh();
+      };
+      try { await go(false); }
+      catch (e) { if (!offerAnyway(err, e, "Send back anyway", go)) err.textContent = e.message; }
     } }, "Send back")),
     err].flat(Infinity).filter(x => x != null)); // replaceChildren takes nodes only
   return box;
+}
+
+// offerAnyway turns a refusal of the usage guard (the plan below the
+// threshold) into a button that starts it anyway; false for other errors.
+function offerAnyway(errBox, e, label, go) {
+  if (!/--anyway/.test(e.message)) return false;
+  errBox.replaceChildren(e.message.replace(/ with --anyway.*$/, "."), " ",
+    h("button", { type: "button", class: "danger", onclick: async () => {
+      try { await go(true); errBox.replaceChildren(); } catch (x) { errBox.textContent = x.message; }
+    } }, label));
+  return true;
+}
+
+// renderUsage shows each plan's share left and the Mac held awake (A19).
+function renderUsage() {
+  const box = document.getElementById("usage");
+  const th = S.snap.threshold || 0;
+  const parts = (S.snap.usage || []).map(u => {
+    const low = u.left >= 0 && th > 0 && u.left < th;
+    const title = (u.windows || []).map(w => w.name + " " + w.left + "%" + (w.resets_at ? " (resets " + w.resets_at + ")" : "")).join(", ") + (u.error ? " — last read failed: " + u.error : "");
+    return h("span", { class: "chip" + (low ? " api" : ""), title }, u.harness + " " + (u.left >= 0 ? u.left + "%" : "?"));
+  });
+  if (S.snap.agents_running) parts.push(h("span", { class: "awake", title: "the service holds macOS's idle-sleep assertion" }, "agents running — keep the Mac awake (lid open or on power)"));
+  if (S.snap.awake_error) parts.push(h("span", { class: "err" }, S.snap.awake_error));
+  box.replaceChildren(...parts);
 }
 
 // isolationChip marks a session whose commands are not in Claude's sandbox.
@@ -612,12 +661,18 @@ function restartControl(sess, act) {
   const sel = draft(h("select", { "aria-label": "Restart with profile" },
     S.snap.profiles.filter(p => p.runnable).map(p => h("option", { value: p.name, selected: p.name === sess.profile },
       p.name + " (" + p.harness + (p.model ? ", " + p.model : "") + ")"))), key);
+  const rerr = h("span", { class: "err" });
   return h("span", { class: "inline" }, sel, act("Restart with", async () => {
     if (!confirmStep("Stop this session and start " + sel.value + " on " + sess.task + " in the same worktree? Its work stays.")) return;
-    const r = await api("POST", `/api/sessions/${encodeURIComponent(sess.id)}/restart`, { profile: sel.value });
-    forget(key);
-    if (r.error) throw new Error(r.error);
-  }));
+    const chosen = sel.value; // the profile confirmed, whatever the select shows later
+    const go = async (anyway) => {
+      const r = await api("POST", `/api/sessions/${encodeURIComponent(sess.id)}/restart`, { profile: chosen, anyway });
+      forget(key);
+      if (r.error) throw new Error(r.error);
+    };
+    rerr.replaceChildren();
+    try { await go(false); } catch (e) { if (!offerAnyway(rerr, e, "Restart " + chosen + " anyway", go)) throw e; }
+  }), rerr);
 }
 
 // renderKeep is the project's "Keep N busy" (A4) in the top bar.

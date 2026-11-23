@@ -24,6 +24,8 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-
 .brand { font-weight: 700; }
 .facts { color: var(--dim); }
 .grow { flex: 1; }
+.usage { display: inline-flex; gap: 4px; align-items: center; }
+.usage .awake { color: var(--warn); font-size: 12px; }
 .keep { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); }
 .keep .err { margin: 0; }
 input.num { width: 4em; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }

@@ -111,6 +111,7 @@ func startWith(t *testing.T, repo *testrepo.Repo, scenario string, mod func(*ser
 	// says so, and codexy's command does not exist
 	stubbed := func(s *serve.Service) {
 		s.CodexLogin = func() (string, error) { return "Not logged in", fmt.Errorf("stub") }
+		s.UsageClaude, s.UsageCodex = nil, nil // never the Keychain or the network
 		if configure != nil {
 			configure(s)
 		}

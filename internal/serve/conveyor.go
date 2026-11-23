@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 // branch and their changes stay; a new session of the chosen profile
 // starts in the same worktree with the task's assignment and a note on
 // the work already there; the claim's harness record moves to it.
-func (s *Service) Restart(ctx context.Context, id, profile string) (*Session, error) {
+func (s *Service) Restart(ctx context.Context, id, profile string, anyway bool) (*Session, error) {
 	l, err := s.byID(id)
 	if err != nil {
 		return nil, err
@@ -35,6 +36,9 @@ func (s *Service) Restart(ctx context.Context, id, profile string) (*Session, er
 		return nil, err
 	}
 	if err := s.preflight(*prof, l.s.Worktree); err != nil {
+		return nil, err
+	}
+	if err := s.guard(*prof, false, anyway); err != nil { // the plan's usage
 		return nil, err
 	}
 	l.sayMu.Lock() // a Say in flight finishes first; later ones see handingOver
@@ -268,6 +272,11 @@ func (s *Service) fill(ctx context.Context) {
 				break
 			}
 			if _, err := s.Run(ctx, RunRequest{Project: p.Name, Task: t.ID, auto: true}); err != nil {
+				if strings.Contains(err.Error(), "automatic starts wait") {
+					// the plan is low, not the task: nothing starts until it is back
+					s.keepError(p.Name, err.Error())
+					break
+				}
 				s.keep.mu.Lock()
 				s.keep.failed[p.Name+"/"+t.ID] = time.Now()
 				s.keep.mu.Unlock()

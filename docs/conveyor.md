@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-23; stages 1, 2, 2b, 3, 4 and 5 are implemented.**
+2026-11-23; stages 1, 2, 2b, 3, 4, 5 and 6 are implemented.**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -1297,6 +1297,80 @@ The smallest loop that runs a real agent on a real task.
   (F11's sources); the threshold that blocks new starts is proposed to the
   person in this stage.
 - The idle-sleep assertion while any agent runs (A19).
+
+#### Stage 6 — implementation decisions (2026-11-23)
+
+1. **Billing badges** were in place for the three harnesses from stages
+   1–3 (Claude's `apiKeySource`, Codex's ChatGPT sign-in or key, OpenCode
+   always API, A27) with the refusals of A17 and A30; this stage adds the
+   provider switches to what is stripped (stage 4) and nothing else.
+2. **Reading the plans** (the person's choice: as Guild reads them):
+   Claude through `security find-generic-password -s "Claude
+   Code-credentials" -w`, the token in memory only, `GET
+   https://api.anthropic.com/api/oauth/usage` with `anthropic-beta:
+   oauth-2025-04-20`, read forgivingly (`limits`, else the older
+   `five_hour`/`seven_day`); a 429 waits its `Retry-After` (15 minutes
+   without one). Codex through `codex app-server`: `initialize`,
+   `initialized`, `account/rateLimits/read`, `primary` and `secondary`.
+   Only harnesses with a subscription profile are read; every 5 minutes;
+   a failed read keeps the last figures, marked.
+3. **The guard** (the person's choice): the lowest window's share left
+   against `usage_threshold` (default 10): below it, automatic starts
+   wait (Keep N busy's starts, a review round — revust's `codex-only`
+   runs on Codex's plan, a postponed round is not counted — and the
+   dispatcher, whose question goes to the person); manual Run, a Say
+   that resumes and Restart are refused unless `anyway` (`--anyway`; the
+   board's "… anyway" button). API-billed profiles and unknown plans are
+   not guarded.
+4. **Power (A19):** one `caffeinate -i -w <service pid>` while at least
+   one agent runs (it ends with the service whatever happens); the
+   snapshot's `agents_running`; the board's note "agents running — keep
+   the Mac awake (lid open or on power)".
+5. **Real check** (2026-11-23): `taskmoor usage` read Claude (75 percent
+   left: session 89, week 75, week · Fable 100) and Codex (26 percent
+   left in the week window); a running session held an assertion on
+   behalf of the service's process, released a second after Stop.
+6. **Review r1 (18 findings), fixed:** the guard sits on the resume path
+   of every Say (the person's, the review's findings as an automatic
+   start, an override, Accept's send-back), not only on the HTTP Say;
+   review rounds and the dispatcher check it again after waiting for a
+   slot; a postponed round runs when the plan is back above the
+   threshold; rounds are guarded on the plan of revust's
+   `review_profile` (codex-only by default, read even with no codex task
+   profile); windows past their reset no longer count; a profile that
+   allows API billing is exempt only when a key is there (without one it
+   runs on the plan); the token's request follows no redirect and uses
+   HTTP/1.1 only (Go's HTTP/2 debug log prints headers); `Retry-After`
+   as a date is read; the first reading is always published; Codex's
+   app-server runs in its own process group with a pipe of the service's
+   own and a deadline that holds; review rounds and the dispatcher's
+   call hold the Mac awake too; a `caffeinate` that fails or ends is
+   shown (and tried again by the next agent); Claude's runner reads its
+   output through a pipe of its own, like the ACP runner; the board
+   offers Restart and Send back anyway, and Say anyway keeps a newer
+   draft. Not changed: a new CLI against an older running service fails
+   on the new request fields (restart the service after an upgrade, as
+   README says).
+7. **Review r2 (15 findings, the last round), fixed:** an old
+   `caffeinate`'s end no longer clears the assertion that replaced it
+   (a generation); after every reading the service goes on with what a
+   low plan held back (postponed rounds, findings that could not resume
+   the session), not only on a crossing; a round neither starts nor runs
+   for a session that went on meanwhile; the plan is checked once more
+   right before revust's providers and the dispatcher's call start (a
+   postponed round is not counted); review profiles other than
+   codex-only and claude-only are guarded on both plans (revust resolves
+   their runners); Claude routes that bill without a key in the
+   environment (an `apiKeyHelper` in its settings, Bedrock, Vertex,
+   Foundry) count as API billing for the guard and are not read as a
+   plan; Override and Accept's send-back are the person's confirmation
+   (they resume anyway), and the send-back is recorded once delivered;
+   Restart anyway restarts the profile that was confirmed; Keep N busy
+   does not mark tasks failed when the plan is low (the pass stops);
+   Send back anyway keeps a newer draft; README names
+   `usage_threshold` in the rollback note. Recorded, not fixed: a board
+   redraw drops a "… anyway" button that was showing (the action is
+   refused again and offers it again).
 
 ### Stage 7 — Telegram
 

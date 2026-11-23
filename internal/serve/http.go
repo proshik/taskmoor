@@ -75,6 +75,7 @@ func Serve(ctx context.Context, s *Service, logf func(string, ...any)) error {
 	wctx, stopWatch := context.WithCancel(ctx)
 	defer stopWatch()
 	go s.watch(wctx)
+	go s.pollUsage(wctx) // the plans' usage (stage 6)
 	select {
 	case <-ctx.Done():
 	case err := <-errc:
@@ -345,6 +346,7 @@ func (s *Service) hStop(w http.ResponseWriter, r *http.Request) {
 func (s *Service) hRestart(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Profile string `json:"profile"`
+		Anyway  bool   `json:"anyway"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeErr(w, err)
@@ -353,7 +355,7 @@ func (s *Service) hRestart(w http.ResponseWriter, r *http.Request) {
 	id, err := s.SessionID(r.PathValue("id"), r.URL.Query().Get("project"))
 	var out *Session
 	if err == nil {
-		out, err = s.Restart(context.WithoutCancel(r.Context()), id, body.Profile)
+		out, err = s.Restart(context.WithoutCancel(r.Context()), id, body.Profile, body.Anyway)
 	}
 	if err != nil && out == nil {
 		writeErr(w, err)
@@ -383,7 +385,8 @@ func (s *Service) hKeep(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) hSay(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Text string `json:"text"`
+		Text   string `json:"text"`
+		Anyway bool   `json:"anyway"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeErr(w, err)
@@ -391,7 +394,7 @@ func (s *Service) hSay(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.SessionID(r.PathValue("id"), r.URL.Query().Get("project"))
 	if err == nil {
-		err = s.Say(context.WithoutCancel(r.Context()), id, body.Text)
+		err = s.sayGuarded(context.WithoutCancel(r.Context()), id, body.Text, body.Anyway)
 	}
 	if err != nil {
 		writeErr(w, err)

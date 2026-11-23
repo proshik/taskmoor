@@ -16,6 +16,7 @@ type sessionHost struct {
 
 func (h *sessionHost) bind(r agentRunner) {
 	h.r = r
+	h.s.agentUp() // the Mac stays awake while an agent runs (A19)
 	h.s.mu.Lock()
 	h.l.runner = r
 	h.l.stopping = false
@@ -134,6 +135,7 @@ func (h *sessionHost) result(res claudeResult) {
 
 func (h *sessionHost) exited(code int, err error) {
 	defer h.s.runners.Done()
+	defer h.s.agentDown()
 	h.s.mu.Lock()
 	if h.l.runner != h.r {
 		h.s.mu.Unlock()

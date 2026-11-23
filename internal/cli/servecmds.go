@@ -147,6 +147,7 @@ func (r runner) handoverCmd(ctx context.Context, args []string) int {
 func (r runner) restartCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("restart", flag.ContinueOnError)
 	profile := fs.String("profile", "", "")
+	anyway := fs.Bool("anyway", false, "")
 	pos, err := parse(fs, args)
 	if err == nil && (len(pos) != 1 || *profile == "") {
 		err = usagef("restart takes one session or task id and --profile NAME")
@@ -158,7 +159,7 @@ func (r runner) restartCmd(ctx context.Context, args []string) int {
 	if err != nil {
 		return r.fail(err, false)
 	}
-	s, err := c.Restart(ctx, pos[0], *profile)
+	s, err := c.Restart(ctx, pos[0], *profile, *anyway)
 	if err != nil && s == nil {
 		return r.serviceFail(err, false)
 	}
@@ -338,6 +339,7 @@ func (r runner) runCmd(ctx context.Context, args []string) int {
 	proj := fs.String("project", "", "")
 	prof := fs.String("profile", "", "")
 	person := fs.Bool("person", false, "")
+	anyway := fs.Bool("anyway", false, "")
 	asJSON := fs.Bool("json", false, "")
 	pos, err := parse(fs, args)
 	if err == nil && len(pos) != 1 {
@@ -363,7 +365,7 @@ func (r runner) runCmd(ctx context.Context, args []string) int {
 			return r.fail(err, *asJSON)
 		}
 	}
-	s, err := c.Run(ctx, serve.RunRequest{Project: *proj, Task: pos[0], Profile: *prof, Person: *person})
+	s, err := c.Run(ctx, serve.RunRequest{Project: *proj, Task: pos[0], Profile: *prof, Person: *person, Anyway: *anyway})
 	if err != nil {
 		return r.serviceFail(err, *asJSON)
 	}
@@ -786,6 +788,56 @@ func (r runner) acceptCmd(ctx context.Context, args []string) int {
 	return ExitOK
 }
 
+// usageCmd shows the plans' usage and the guard (stage 6).
+func (r runner) usageCmd(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("usage", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "")
+	if _, err := parse(fs, args); err != nil {
+		return r.fail(err, *asJSON)
+	}
+	c, err := r.client()
+	if err != nil {
+		return r.fail(err, *asJSON)
+	}
+	us, th, running, err := c.Usage(ctx)
+	if err != nil {
+		return r.serviceFail(err, *asJSON)
+	}
+	if *asJSON {
+		_ = writeJSON(r.env.Stdout, map[string]any{"format": 1, "usage": us, "threshold": th, "agents_running": running})
+		return ExitOK
+	}
+	if len(us) == 0 {
+		fmt.Fprintln(r.env.Stdout, "no subscription plan read yet (claude and codex profiles without API billing are read every 5 minutes)")
+	}
+	for _, u := range us {
+		left := "unknown"
+		if u.Left >= 0 {
+			left = fmt.Sprintf("%d%% left", u.Left)
+		}
+		fmt.Fprintf(r.env.Stdout, "%s: %s", u.Harness, left)
+		for _, w := range u.Windows {
+			fmt.Fprintf(r.env.Stdout, " · %s %d%%", w.Name, w.Left)
+			if w.ResetsAt != "" {
+				fmt.Fprintf(r.env.Stdout, " (resets %s)", w.ResetsAt)
+			}
+		}
+		if u.Error != "" {
+			fmt.Fprintf(r.env.Stdout, " · last read failed: %s", text.Line(u.Error))
+		}
+		fmt.Fprintln(r.env.Stdout)
+	}
+	if th > 0 {
+		fmt.Fprintf(r.env.Stdout, "guard: below %d%% left, automatic starts wait and manual ones need --anyway\n", th)
+	} else {
+		fmt.Fprintln(r.env.Stdout, "guard: off (usage_threshold = 0)")
+	}
+	if running {
+		fmt.Fprintln(r.env.Stdout, "agents running: the Mac is held awake (keep the lid open or on power)")
+	}
+	return ExitOK
+}
+
 // decisionsCmd lists the dispatcher's decisions (C3).
 func (r runner) decisionsCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("decisions", flag.ContinueOnError)
@@ -897,6 +949,7 @@ func (r runner) stopCmd(ctx context.Context, args []string) int {
 func (r runner) sayCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("say", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "")
+	anyway := fs.Bool("anyway", false, "")
 	pos, err := parse(fs, args)
 	if err == nil && len(pos) < 2 {
 		err = usagef("say takes a session or task id and the instruction (put -- before an instruction that starts with -)")
@@ -908,7 +961,7 @@ func (r runner) sayCmd(ctx context.Context, args []string) int {
 	if err != nil {
 		return r.fail(err, *asJSON)
 	}
-	s, err := c.Say(ctx, pos[0], strings.Join(pos[1:], " "))
+	s, err := c.Say(ctx, pos[0], strings.Join(pos[1:], " "), *anyway)
 	if err != nil {
 		return r.serviceFail(err, *asJSON)
 	}

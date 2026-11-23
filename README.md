@@ -130,6 +130,26 @@ model = "provider/model"
   automatic start whose agent fails after the claim (no answer from the
   agent, a refused sign-in) leaves the task claimed with the session in
   error and its slot free: Restart it with a profile, or Release it.
+- **Usage and power (stage 6).** Every 5 minutes the service reads how
+  much of each subscription plan is left: Claude's from the OAuth token
+  Claude Code keeps in the login Keychain and the undocumented
+  `oauth/usage` endpoint (the token stays in memory; macOS may ask once
+  to allow taskmoor to read the item), Codex's from `codex app-server`
+  (Codex keeps its token). `taskmoor usage` and the board's top bar show
+  them. Below `usage_threshold` (default 10 percent left; 0 turns the
+  guard off) automatic starts wait — Keep N busy, review rounds (on
+  Codex's plan) and the dispatcher — and Run, Say (when it resumes) and
+  Restart need `--anyway` (the board offers "… anyway"). Running sessions
+  are not touched; a profile that bills an API key (allowed and a key
+  present) has no plan to guard; a plan never read does not stop
+  anything, and one whose read fails later keeps its last figures until
+  their windows reset. Review rounds are guarded on the plan of revust's
+  `review_profile` (codex-only: Codex), and a postponed round runs when
+  the plan is back above the threshold. While any agent runs the service
+  holds macOS's idle-sleep assertion (`caffeinate -i`, ended with the
+  service) — sessions, review rounds and the dispatcher's calls count; the
+  board says "agents running — keep the Mac awake" (or why the assertion
+  could not be held): a lid closed on battery still sleeps.
 - **Review and acceptance (stage 5).** When a session's turn ends, the
   task (`review`) gets `min(reviews.code, 2)` code-review rounds by
   revust (`review_command`, default
@@ -186,7 +206,8 @@ model = "provider/model"
   Say: mid-turn it waits for the next turn, so a session stopped before
   then does not get it; override again. Before going back to an older
   taskmoor, remove `dispatcher_profile` from the config (older versions
-  refuse unknown keys).
+  refuse unknown keys); the same goes for `usage_threshold` before going
+  back past stage 6.
 - **Codex and OpenCode sessions.** Questions arrive as forms (Codex asks in
   its Default mode with `default_mode_request_user_input`); approvals as
   ACP permission requests, through the same rules as Claude's; what the
