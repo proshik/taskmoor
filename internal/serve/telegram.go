@@ -653,7 +653,12 @@ func (s *Service) sendAsk(a *Ask, reminder bool) {
 		}
 		s.tg.mu.Unlock()
 	}()
-	text, markup := askMessage(a, fmt.Sprintf("http://127.0.0.1:%d/", port), reminder)
+	board, remote := fmt.Sprintf("http://127.0.0.1:%d/", port), false
+	if cfg, err := s.Config(); err == nil && cfg.RemoteHost != "" {
+		// the phone cannot open the Mac's loopback: the board from outside
+		board, remote = "https://"+cfg.RemoteHost+"/", true
+	}
+	text, markup := askMessage(a, board, remote, reminder)
 	params := map[string]any{"chat_id": f.ChatID, "text": text}
 	if markup != nil {
 		params["reply_markup"] = markup
@@ -698,7 +703,11 @@ func (s *Service) sendAsk(a *Ask, reminder bool) {
 }
 
 // askMessage is an ask's text and buttons (nil: none).
-func askMessage(a *Ask, board string, reminder bool) (string, any) {
+func askMessage(a *Ask, board string, remote, reminder bool) (string, any) {
+	where := "on the board on your Mac"
+	if remote {
+		where = "on the board (from a paired device, its passkey confirms an approval)"
+	}
 	var b strings.Builder
 	if reminder {
 		b.WriteString("Still waiting for you.\n")
@@ -707,9 +716,9 @@ func askMessage(a *Ask, board string, reminder bool) (string, any) {
 	if a.Kind != "question" {
 		// nothing of the request itself: a command or a tool's input can
 		// hold a secret, and it is answered on the Mac only (A9)
-		return b.String() + "An approval waits for you. Answer it on the board on your Mac: " + board, nil
+		return b.String() + "An approval waits for you. Answer it " + where + ": " + board, nil
 	}
-	tail := "\n\nAnswer on the board on your Mac: " + board
+	tail := "\n\nAnswer " + where + ": " + board
 	if !simpleAsk(a) {
 		for i, q := range a.Questions {
 			if q.Secret {

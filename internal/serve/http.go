@@ -73,8 +73,21 @@ func Serve(ctx context.Context, s *Service, logf func(string, ...any)) error {
 	srv := &http.Server{Handler: s.Handler(token, port), ReadHeaderTimeout: 10 * time.Second}
 	logf("taskmoor serve %s: http://127.0.0.1:%d, store %s, config %s", s.Version, port, s.Paths.Store, s.Paths.Config)
 	logf("open the board: %s (one-time link; `taskmoor web` makes a new one)", s.LoginURL(port))
-	errc := make(chan error, 1)
+	errc := make(chan error, 2)
 	go func() { errc <- srv.Serve(ln) }()
+	// the web from outside (stage 9): a second listener, which only the
+	// reverse ssh tunnel reaches
+	var rsrv *http.Server
+	if cfg.RemoteHost != "" && cfg.RemotePort != 0 {
+		rln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.RemotePort))
+		if err != nil {
+			_ = srv.Close()
+			return fmt.Errorf("remote_port %d: %w", cfg.RemotePort, err)
+		}
+		rsrv = &http.Server{Handler: s.RemoteHandler(cfg.RemoteHost, cfg.RemotePort, s.apiMux(token, port)), ReadHeaderTimeout: 10 * time.Second}
+		logf("the web from outside: https://%s/ reaches 127.0.0.1:%d through the tunnel", cfg.RemoteHost, cfg.RemotePort)
+		go func() { errc <- rsrv.Serve(rln) }()
+	}
 	wctx, stopWatch := context.WithCancel(ctx)
 	defer stopWatch()
 	go s.watch(wctx)
@@ -94,6 +107,11 @@ func Serve(ctx context.Context, s *Service, logf func(string, ...any)) error {
 	defer cancel()
 	if err := srv.Shutdown(sctx); err != nil {
 		_ = srv.Close() // a connection that would not finish: cut it
+	}
+	if rsrv != nil {
+		if err := rsrv.Shutdown(sctx); err != nil {
+			_ = rsrv.Close()
+		}
 	}
 	return nil
 }
@@ -149,7 +167,9 @@ func writeAtomic(p string, data []byte) error {
 
 // Handler is the API: every request needs the token and a loopback Host
 // (no DNS rebinding from a browser page).
-func (s *Service) Handler(token string, port int) http.Handler {
+// apiMux is the API both listeners serve; each wraps it in its own
+// credentials.
+func (s *Service) apiMux(token string, port int) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/snapshot", s.hSnapshot)
 	mux.HandleFunc("GET /api/events", s.hEvents)
@@ -333,6 +353,54 @@ func (s *Service) Handler(token string, port int) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"url": s.LoginURL(port)})
 	})
 	mux.HandleFunc("GET /api/projects/{project}/tasks/{id}", s.hTask)
+	// devices (stage 9): made and revoked on the Mac only
+	local := func(r *http.Request) bool {
+		kind, _ := s.authorize(r, token)
+		return kind == credAPI || kind == credBrowser
+	}
+	mux.HandleFunc("GET /api/devices", func(w http.ResponseWriter, r *http.Request) {
+		if !local(r) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "devices are managed on the Mac"})
+			return
+		}
+		ds, err := s.Devices()
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, ds)
+	})
+	mux.HandleFunc("POST /api/devices/pair", func(w http.ResponseWriter, r *http.Request) {
+		if !local(r) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "devices are paired from the Mac"})
+			return
+		}
+		code, err := s.DevicePairCode()
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		cfg, _ := s.Config()
+		writeJSON(w, http.StatusOK, map[string]string{"code": code, "url": "https://" + cfg.RemoteHost + "/"})
+	})
+	mux.HandleFunc("POST /api/devices/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
+		if !local(r) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "devices are revoked on the Mac"})
+			return
+		}
+		if err := s.RevokeDevice(r.PathValue("id")); err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
+	})
+	return mux
+}
+
+// Handler is the Mac's own listener: the API token (CLI) or a browser
+// signed in with a one-time link.
+func (s *Service) Handler(token string, port int) http.Handler {
+	mux := s.apiMux(token, port)
 	hosts := map[string]bool{
 		fmt.Sprintf("127.0.0.1:%d", port): true,
 		fmt.Sprintf("localhost:%d", port): true,
@@ -349,6 +417,9 @@ func (s *Service) Handler(token string, port int) http.Handler {
 		switch {
 		case r.URL.Path == "/api/sign-in" && r.Method == http.MethodPost:
 			s.hSignIn(w, r)
+			return
+		case r.URL.Path == "/api/whoami" && r.Method == http.MethodGet:
+			writeJSON(w, http.StatusOK, map[string]any{"remote": false})
 			return
 		case r.URL.Path == "/api/proof" && r.Method == http.MethodGet:
 			// the service shows it holds the API token without anyone

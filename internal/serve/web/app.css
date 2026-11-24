@@ -1,3 +1,4 @@
+[hidden] { display: none !important; } /* the hidden attribute wins over a class's display */
 :root {
   --bg: #f6f6f4; --panel: #ffffff; --ink: #1d1d1b; --dim: #6b6b66; --line: #e2e2dc;
   --accent: #2f5fd0; --warn: #b7791f; --bad: #c0392b; --good: #2e7d4f; --chip: #ececE6;

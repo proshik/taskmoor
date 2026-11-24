@@ -49,9 +49,10 @@ type Service struct {
 	tg          telegram
 	awake       awake
 	pid         int
-	acceptMu    sync.Mutex // one merge at a time
-	ideaMu      sync.Mutex // grilling, approving and dropping ideas, one at a time
-	ideaSave    sync.Mutex // an idea's record, from copy to store
+	acceptMu    sync.Mutex  // one merge at a time
+	ideaMu      sync.Mutex  // grilling, approving and dropping ideas, one at a time
+	ideaSave    sync.Mutex  // an idea's record, from copy to store
+	rm          remoteState // paired devices and their passkeys (stage 9)
 	ideas       map[string]*Idea
 	decCache    []Ruling // nil: read the store again
 
@@ -220,7 +221,7 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 		usage:   usageState{last: map[string]Usage{}, pause: map[string]time.Time{}},
 		tg:      newTelegram(),
 		journal: j, bus: newBus(), sessions: map[string]*live{}, asks: map[string]*Ask{}, owners: map[string]*os.File{},
-		ideas: map[string]*Idea{}}
+		ideas: map[string]*Idea{}, rm: newRemoteState()}
 	s.auth = newWebAuth(func() time.Time { return s.Now() }, filepath.Join(paths.Store, "web-sessions.json"))
 	if err := s.loadIdeas(); err != nil {
 		lock.Close()
@@ -1243,6 +1244,8 @@ type Snapshot struct {
 	Telegram *TelegramStatus `json:"telegram"`
 	// Ideas are the raw ideas and their grilling (stage 8), newest first.
 	Ideas []Idea `json:"ideas"`
+	// RemoteHost is the web from outside's domain ("" when off).
+	RemoteHost string `json:"remote_host,omitempty"`
 	// Decisions are the dispatcher's latest decisions; Dispatcher names its
 	// profile ("" when it is off).
 	Decisions  []Ruling `json:"decisions"`
@@ -1296,6 +1299,7 @@ func (s *Service) Snapshot(ctx context.Context) (*Snapshot, error) {
 	out.AgentsRunning, out.AwakeError = s.AgentsRunning()
 	out.Telegram = s.TelegramStatus()
 	out.Ideas = s.Ideas()
+	out.RemoteHost = cfg.RemoteHost
 	// the 30 latest the dispatcher answered: those the person may override
 	out.Decisions = []Ruling{}
 	if ds, err := s.Decisions(0); err == nil {

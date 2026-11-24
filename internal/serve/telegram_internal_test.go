@@ -12,7 +12,7 @@ func TestAskMessage(t *testing.T) {
 	q := Question{Question: "Pick", Recommended: -1, Options: []Option{
 		{Label: strings.Repeat("a", 70) + " one"}, {Label: strings.Repeat("a", 70) + " two"}}}
 	a := &Ask{Kind: "question", Project: "p", Task: "T-1", ID: "x", Questions: []Question{q}}
-	text, markup := askMessage(a, board, false)
+	text, markup := askMessage(a, board, false, false)
 	rows := markup.(map[string]any)["inline_keyboard"].([][]map[string]string)
 	if rows[0][0]["text"] == rows[1][0]["text"] || !strings.Contains(text, " one") || !strings.Contains(text, " two") {
 		t.Fatalf("choices alike: %q %v", text, rows)
@@ -24,13 +24,13 @@ func TestAskMessage(t *testing.T) {
 	}
 	// a long question keeps the whole link
 	a.Questions = []Question{{Question: strings.Repeat("я", 5000), FreeText: true}}
-	text, markup = askMessage(a, board, false)
+	text, markup = askMessage(a, board, false, false)
 	if markup != nil || !strings.HasSuffix(text, board) || len(text) > 4000 || !strings.Contains(text, "я…") {
 		t.Fatalf("%d %q", len(text), text[len(text)-80:])
 	}
 	// an approval carries nothing of the request
 	ap := &Ask{Kind: "approval", Project: "p", Task: "T-1", Tool: "Bash", Detail: "curl -H 'Authorization: Bearer sk-secret'", Reason: "network"}
-	text, markup = askMessage(ap, board, false)
+	text, markup = askMessage(ap, board, false, false)
 	if markup != nil || strings.Contains(text, "sk-secret") || strings.Contains(text, "Bash") || !strings.HasSuffix(text, board) {
 		t.Fatalf("%q", text)
 	}
@@ -80,6 +80,15 @@ func TestSetupChecksTheListener(t *testing.T) {
 	}
 	if proof("api-token", "n") == proof("other", "n") {
 		t.Fatal("the proof does not depend on the token")
+	}
+}
+
+// With the web from outside on, the link is the board's from outside.
+func TestAskMessageRemote(t *testing.T) {
+	ap := &Ask{Kind: "approval", Project: "p", Task: "T-1"}
+	text, _ := askMessage(ap, "https://board.example.org/", true, false)
+	if !strings.HasSuffix(text, "https://board.example.org/") || strings.Contains(text, "on your Mac") || !strings.Contains(text, "passkey") {
+		t.Fatalf("%q", text)
 	}
 }
 

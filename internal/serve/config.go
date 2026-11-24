@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"syscall"
 
 	"github.com/BurntSushi/toml"
@@ -68,6 +69,10 @@ type Config struct {
 	// automatic starts wait and manual ones need --anyway (default 10;
 	// 0 turns the guard off).
 	UsageThreshold *int `toml:"usage_threshold,omitempty"`
+	// RemoteHost and RemotePort are the web from outside (stage 9): the
+	// VPS's domain, and the port on 127.0.0.1 its reverse tunnel reaches.
+	RemoteHost string `toml:"remote_host,omitempty"`
+	RemotePort int    `toml:"remote_port,omitempty"`
 }
 
 // Project is a registered repository.
@@ -177,6 +182,17 @@ func defaultConfig() *Config {
 
 // Check validates the configuration; path names it in messages.
 func (c *Config) Check(path string) error {
+	if (c.RemoteHost == "") != (c.RemotePort == 0) {
+		return fmt.Errorf("%s: remote_host and remote_port go together", path)
+	}
+	if c.RemoteHost != "" {
+		if strings.ContainsAny(c.RemoteHost, ":/ @") || strings.TrimSpace(c.RemoteHost) != c.RemoteHost {
+			return fmt.Errorf("%s: remote_host is a domain name (no scheme, port or path), not %q", path, c.RemoteHost)
+		}
+		if c.RemotePort < 1 || c.RemotePort > 65535 || c.RemotePort == c.Port {
+			return fmt.Errorf("%s: remote_port must be a free port other than port", path)
+		}
+	}
 	seen := map[string]bool{}
 	for _, p := range c.Profiles {
 		if !nameRe.MatchString(p.Name) {

@@ -80,6 +80,8 @@ The service (taskmoor serve) and its clients:
   taskmoor idea list | show ID | drop ID               the ideas
   taskmoor idea grill ID [--profile P] [--anyway]      an agent grills it with you and writes its tasks
   taskmoor idea review ID [--diff] | approve ID --tip C --main M  look at its tasks; land them on main
+  taskmoor device pair | list | revoke ID              devices that reach the board from outside (stage 9)
+  taskmoor remote files --vps USER@HOST --auth-domain D [--out DIR]  the tunnel and the VPS's files
   taskmoor acceptance ID [--diff] [--json]             the work to accept: commits, diff, review, checks
   taskmoor accept ID                                   merge the task's branch into main (trial merge first)
   taskmoor override DECISION N [N…] | --text T          replace a dispatcher answer (sent to the session)
@@ -164,6 +166,10 @@ func Run(ctx context.Context, args []string, env Env) int {
 		return r.telegramCmd(ctx, rest)
 	case "idea":
 		return r.ideaCmd(ctx, rest)
+	case "device":
+		return r.deviceCmd(ctx, rest)
+	case "remote":
+		return r.remoteCmd(ctx, rest)
 	case "acceptance":
 		return r.acceptanceCmd(ctx, rest)
 	case "accept":

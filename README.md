@@ -143,6 +143,21 @@ model = "provider/model"
   commit; the intake's own history stays on its branch; if main has
   moved, the branch goes back to its session to be brought up to date
   first). Push stays yours; the worktree and branch stay. `taskmoor idea list | show | drop`.
+- **The web from outside (stage 9, v2).** The phone opens
+  `https://<remote_host>/`: Caddy on your VPS asks for your passkey
+  (Pocket ID through oauth2-proxy), then a reverse ssh tunnel from the Mac
+  reaches a second listener of `taskmoor serve` on
+  `127.0.0.1:<remote_port>`. That listener knows no sign-in link and no
+  API token: a device is paired once with `taskmoor device pair` (a code
+  shown on the Mac, 10 minutes) and creates a passkey for `remote_host`;
+  every Accept, Approve and allowed request from it is confirmed with that
+  passkey again (a deny is not). Opening Finder or an editor, Telegram's
+  setup and devices are the Mac's only. `taskmoor device list | revoke
+  ID`. `taskmoor remote files --vps USER@HOST --auth-domain D` writes the
+  Mac's launchd agent for the tunnel and the VPS's Caddyfile,
+  docker-compose.yml (Caddy, Pocket ID, oauth2-proxy, pinned versions),
+  .env (with new secrets, mode 0600) and the restricted authorized_keys
+  line, with a README of the steps; it installs and deploys nothing.
 - **Telegram (stage 7).** Questions and approvals reach your Telegram:
   create a bot with @BotFather, then `taskmoor telegram setup` (the token
   is read from stdin, kept in the store with mode 0600, never shown) and

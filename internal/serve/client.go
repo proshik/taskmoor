@@ -418,3 +418,22 @@ func (c *Client) DropIdea(ctx context.Context, id string) (*Idea, error) {
 	err := c.do(ctx, http.MethodPost, "/api/ideas/"+url.PathEscape(id)+"/drop", map[string]any{}, &out)
 	return &out, err
 }
+
+// DevicePair makes a one-time code for pairing a remote device.
+func (c *Client) DevicePair(ctx context.Context) (code, url string, err error) {
+	var out struct{ Code, URL string }
+	err = c.do(ctx, http.MethodPost, "/api/devices/pair", map[string]any{}, &out)
+	return out.Code, out.URL, err
+}
+
+// Devices lists the paired remote devices.
+func (c *Client) Devices(ctx context.Context) ([]DeviceView, error) {
+	var out []DeviceView
+	err := c.do(ctx, http.MethodGet, "/api/devices", nil, &out)
+	return out, err
+}
+
+// RevokeDevice forgets a remote device.
+func (c *Client) RevokeDevice(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/api/devices/"+url.PathEscape(id)+"/revoke", map[string]any{}, nil)
+}

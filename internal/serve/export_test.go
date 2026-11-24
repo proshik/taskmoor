@@ -52,3 +52,17 @@ func (s *Service) AnswerIf(id string, n int, still func() bool) error {
 func (s *Service) SetApproving(id string, ap Approval) {
 	_, _ = s.changeIdea(id, func(i *Idea) error { i.Approving = &ap; return nil })
 }
+
+// ClearCeremonies forgets the confirmations under way.
+func (s *Service) ClearCeremonies() {
+	s.rm.mu.Lock()
+	s.rm.ceremonies = map[string]*ceremony{}
+	s.rm.mu.Unlock()
+}
+
+// SetRemoteStreamTTL bounds remote event streams; the returned func puts it back.
+func SetRemoteStreamTTL(d time.Duration) func() {
+	old := remoteStreamTTL
+	remoteStreamTTL = d
+	return func() { remoteStreamTTL = old }
+}

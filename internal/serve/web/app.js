@@ -82,10 +82,16 @@ function signinMessage(text) {
 
 class Unauthorized extends Error {}
 
-async function api(method, path, body) {
-  const token = localGet("token");
-  if (!token) { showSignin(); throw new Unauthorized("not signed in"); }
-  const opts = { method, headers: { "Authorization": "Bearer " + token } };
+// From outside (stage 9) the board is a paired device: its token, kept in
+// this origin's storage, and the device's passkey for each Accept, Approve
+// and allowed request (the service answers 428 and names what to confirm).
+function credKey() { return S.remote ? "device" : "token"; }
+function authHeader() { return (S.remote ? "Device " : "Bearer ") + (localGet(credKey()) || ""); }
+
+async function api(method, path, body, stepup) {
+  if (!localGet(credKey())) { showSignin(); throw new Unauthorized("not signed in"); }
+  const opts = { method, headers: { "Authorization": authHeader() } };
+  if (stepup) opts.headers["X-Taskmoor-Stepup"] = stepup;
   if (method !== "GET") {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body || {});
@@ -93,18 +99,99 @@ async function api(method, path, body) {
   const resp = await fetch(path, opts);
   let data = null;
   try { data = await resp.json(); } catch { /* empty */ }
-  if (resp.status === 401) { localSet("token", null); showSignin(); throw new Unauthorized("not signed in"); }
+  if (resp.status === 401 && S.remote && resp.headers.get("X-Taskmoor-Login") === "required") { outerSignIn(); throw new Unauthorized("sign in again"); }
+  if (resp.status === 401) { localSet(credKey(), null); showSignin(); throw new Unauthorized("not signed in"); }
+  if (resp.status === 428 && S.remote && data && data.stepup && !stepup) {
+    return api(method, path, body, await stepUp(data.stepup));
+  }
   if (!resp.ok) throw new Error((data && data.error) || resp.statusText);
   return data;
+}
+
+// outerSignIn: the VPS's sign-in has expired (the device stays paired):
+// the whole page goes through it again.
+function outerSignIn() {
+  location.assign("/oauth2/sign_in?rd=" + encodeURIComponent(location.href));
+}
+
+function b64uToBuf(s) {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  return Uint8Array.from(atob(s), c => c.charCodeAt(0)).buffer;
+}
+function bufToB64u(b) {
+  let s = "";
+  for (const x of new Uint8Array(b)) s += String.fromCharCode(x);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function postOpen(path, body) {
+  const resp = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || resp.statusText);
+  return data;
+}
+
+// pairDevice spends a code from the Mac and registers this device's passkey.
+async function pairDevice(code, name) {
+  const b = await postOpen("/api/device/pair/begin", { code, name });
+  const pk = b.options.publicKey;
+  pk.challenge = b64uToBuf(pk.challenge);
+  pk.user.id = b64uToBuf(pk.user.id);
+  for (const c of pk.excludeCredentials || []) c.id = b64uToBuf(c.id);
+  const cred = await navigator.credentials.create({ publicKey: pk });
+  const r = cred.response;
+  const credential = { id: cred.id, rawId: bufToB64u(cred.rawId), type: cred.type,
+    response: { clientDataJSON: bufToB64u(r.clientDataJSON), attestationObject: bufToB64u(r.attestationObject),
+      transports: r.getTransports ? r.getTransports() : [] },
+    clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {} };
+  const f = await postOpen("/api/device/pair/finish", { ceremony: b.ceremony, credential });
+  localSet("device", f.token);
+}
+
+// stepUp confirms one dangerous action with this device's passkey and
+// returns the one-use grant for it.
+async function stepUp(action) {
+  const b = await api("POST", "/api/stepup/begin", { action });
+  const pk = b.options.publicKey;
+  pk.challenge = b64uToBuf(pk.challenge);
+  for (const c of pk.allowCredentials || []) c.id = b64uToBuf(c.id);
+  const a = await navigator.credentials.get({ publicKey: pk });
+  const r = a.response;
+  const assertion = { id: a.id, rawId: bufToB64u(a.rawId), type: a.type,
+    response: { clientDataJSON: bufToB64u(r.clientDataJSON), authenticatorData: bufToB64u(r.authenticatorData),
+      signature: bufToB64u(r.signature), userHandle: r.userHandle ? bufToB64u(r.userHandle) : null },
+    clientExtensionResults: a.getClientExtensionResults ? a.getClientExtensionResults() : {} };
+  const f = await api("POST", "/api/stepup/finish", { ceremony: b.ceremony, assertion });
+  return f.stepup;
 }
 
 function showSignin() {
   S.gen++; if (S.abort) { S.abort.abort(); S.abort = null; } // no stream without a sign-in
   S.connected = false;
+  if (S.remote) pairView();
   document.getElementById("signin").hidden = false;
   document.getElementById("board").hidden = true;
   document.querySelector(".top").hidden = true;
   document.getElementById("panel").hidden = true;
+}
+
+// pairView: from outside, a device not paired yet pairs with a code shown
+// on the Mac (taskmoor device pair).
+function pairView() {
+  const box = document.getElementById("signin");
+  const msg = h("p", { id: "signin-msg", class: "err" });
+  const code = h("input", { type: "text", placeholder: "Code from the Mac (taskmoor device pair)", autocomplete: "one-time-code", autocapitalize: "none" });
+  const name = h("input", { type: "text", placeholder: "This device's name (e.g. phone)" });
+  const btn = h("button", { type: "button", class: "primary", onclick: async () => {
+    btn.disabled = true; msg.textContent = "";
+    try { await pairDevice(code.value, name.value); showBoard(); refresh(); }
+    catch (e) { msg.textContent = "Not paired: " + e.message; }
+    btn.disabled = false;
+  } }, "Pair and create a passkey");
+  box.replaceChildren(h("h1", {}, "taskmoor"),
+    h("p", {}, "This device is not paired. On the Mac run ", h("code", {}, "taskmoor device pair"), " and enter its code here; this device then creates a passkey, which confirms every Accept, Approve and allowed request from it."),
+    code, name, btn, msg);
 }
 
 function showBoard() {
@@ -197,14 +284,17 @@ function connect() {
   const gen = ++S.gen;
   const ctl = new AbortController();
   S.abort = ctl; S.streamEpoch = S.snap.epoch;
-  const token = localGet("token");
+  const auth = authHeader();
   (async () => {
     let resp;
     try {
       resp = await fetch(`/api/events?epoch=${encodeURIComponent(S.snap.epoch)}&rev=${S.snap.rev}`,
-        { headers: { "Authorization": "Bearer " + token }, signal: ctl.signal });
+        { headers: { "Authorization": auth }, signal: ctl.signal });
     } catch { if (gen === S.gen) lost(); return; }
-    if (resp.status === 401) { localSet("token", null); showSignin(); return; }
+    if (resp.status === 401) {
+      if (S.remote && resp.headers.get("X-Taskmoor-Login") === "required") { outerSignIn(); return; }
+      localSet(credKey(), null); showSignin(); return;
+    }
     if (!resp.ok || !resp.body) { if (gen === S.gen) lost(); return; }
     if (gen !== S.gen) return;
     S.connected = true; conn(); banner(null);
@@ -252,7 +342,7 @@ function onEvent(data) {
 }
 
 // a stream that died without telling is retried
-setInterval(() => { if (!S.connected && localGet("token")) refresh(); }, 5000);
+setInterval(() => { if (!S.connected && localGet(credKey())) refresh(); }, 5000);
 
 function conn() {
   const el = document.getElementById("conn");
@@ -367,7 +457,7 @@ function ideaCard(project, i) {
 function openIdea(project, id) {
   const fresh = !isSelected(project, id);
   S.project = project; localSet("project", project);
-  S.selected = { project, task: id, idea: true }; S.inbox = false;
+  S.selected = { project, task: id, idea: true }; S.inbox = false; S.devices = false;
   if (fresh) { S.feed = null; S.body = null; }
   render();
   if (fresh) document.getElementById("panel").scrollTop = 0;
@@ -375,7 +465,7 @@ function openIdea(project, id) {
 
 function openNewIdea(project) {
   S.project = project; localSet("project", project);
-  S.selected = { project, task: "", newIdea: true }; S.inbox = false; S.feed = null;
+  S.selected = { project, task: "", newIdea: true }; S.inbox = false; S.devices = false; S.feed = null;
   render();
 }
 
@@ -411,7 +501,7 @@ function ideaView(p, i) {
   const waiting = S.snap.asks.filter(a => a.session === i.session);
   if (waiting.length) {
     out.push(h("p", { class: "needs-note" }, "The grilling waits for you: " + waiting.length + " question(s) or approval(s). ",
-      h("button", { type: "button", class: "primary", onclick: () => { S.inbox = true; S.selected = null; render(); } }, "Answer in Needs you")));
+      h("button", { type: "button", class: "primary", onclick: () => { S.inbox = true; S.devices = false; S.selected = null; render(); } }, "Answer in Needs you")));
   }
   const err = h("div", { class: "err" });
   if (i.state === "new") {
@@ -484,6 +574,42 @@ function ideaReviewView(i) {
   return box;
 }
 
+// devicesView: on the Mac's board, the devices paired from outside (stage
+// 9): a pairing code, the list, revoke.
+async function loadDevices() {
+  try { S.deviceList = await api("GET", "/api/devices"); } catch (e) { S.deviceErr = e.message; }
+  render();
+}
+
+function devicesView() {
+  const err = h("div", { class: "err" }, S.deviceErr || "");
+  const out = [h("h1", {}, "Devices"),
+    h("p", { class: "desc" }, "Devices reach this board from https://" + S.snap.remote_host + "/ through your VPS. Each one is paired once with a code from here and confirms every Accept, Approve and allowed request with its own passkey.")];
+  const pairBtn = h("button", { type: "button", class: "primary", onclick: async () => {
+    err.textContent = "";
+    try { S.pairing = await api("POST", "/api/devices/pair", {}); S.pairingAt = Date.now(); render(); }
+    catch (e) { err.textContent = e.message; }
+  } }, "Pair a device");
+  out.push(h("div", { class: "actions" }, pairBtn));
+  if (S.pairing && Date.now() - S.pairingAt < 10 * 60 * 1000) {
+    out.push(h("p", {}, "On the device open ", h("b", {}, S.pairing.url), ", sign in, and enter ", h("b", { class: "mono" }, S.pairing.code), " within 10 minutes (it works once)."));
+  }
+  const ds = S.deviceList || [];
+  out.push(h("h3", {}, "Paired"));
+  if (!ds.length) out.push(h("p", { class: "empty" }, "None."));
+  for (const d of ds) {
+    out.push(h("div", { class: "row" }, h("b", {}, d.name), " ", h("span", { class: "mono" }, d.id),
+      " paired " + clock(d.created) + (d.last_seen ? ", last seen " + clock(d.last_seen) : ""), " ",
+      h("button", { type: "button", class: "danger", onclick: async () => {
+        if (!confirmStep("Revoke " + d.name + "? Its token and passkey stop working at once.")) return;
+        try { await api("POST", `/api/devices/${encodeURIComponent(d.id)}/revoke`, {}); await loadDevices(); }
+        catch (e) { err.textContent = e.message; }
+      } }, "Revoke")));
+  }
+  out.push(err);
+  return out;
+}
+
 function isSelected(project, task) { return S.selected && S.selected.project === project && S.selected.task === task; }
 
 function card(project, t, sess, col) {
@@ -524,7 +650,7 @@ async function openTask(project, id) {
   const fresh = !isSelected(project, id);
   const gen = S.bodyGen = (S.bodyGen || 0) + 1; // a later open wins over an earlier response
   S.project = project; localSet("project", project);
-  S.selected = { project, task: id }; S.inbox = false;
+  S.selected = { project, task: id }; S.inbox = false; S.devices = false;
   if (fresh) { S.feed = null; S.body = null; }
   render();
   if (fresh) document.getElementById("panel").scrollTop = 0;
@@ -576,6 +702,7 @@ function renderPanel() {
   const body = document.getElementById("panel-body");
   const show = (on) => { panel.hidden = !on; document.body.classList.toggle("has-panel", on); };
   if (S.inbox) { show(true); body.replaceChildren(...nodes(inboxView())); return; }
+  if (S.devices) { show(true); body.replaceChildren(...nodes(devicesView())); return; }
   if (S.selected && S.selected.newIdea) { show(true); body.replaceChildren(...nodes(newIdeaView(S.selected.project))); return; }
   if (S.selected && S.selected.idea) {
     const ip = S.snap.projects.find(x => x.name === S.selected.project);
@@ -687,8 +814,8 @@ function sessionView(sess) {
       h("dt", {}, "resume"), h("dd", { class: "mono" }, sess.resume)),
     h("div", { class: "actions" },
       act("Copy cd", () => copy("cd " + shellQuote(sess.worktree))),
-      act("Open in Finder", () => api("POST", `/api/sessions/${sid}/open`, { with: "finder" })),
-      act("Open in editor", () => api("POST", `/api/sessions/${sid}/open`, { with: "editor" })),
+      S.remote ? null : act("Open in Finder", () => api("POST", `/api/sessions/${sid}/open`, { with: "finder" })),
+      S.remote ? null : act("Open in editor", () => api("POST", `/api/sessions/${sid}/open`, { with: "editor" })),
       mine ? act("Continue in terminal", async () => {
         if (!confirmStep("Stop the agent and continue this conversation in your terminal?")) return;
         const r = await api("POST", `/api/sessions/${sid}/handover`, {});
@@ -811,6 +938,10 @@ function renderUsage() {
   });
   if (S.snap.agents_running) parts.push(h("span", { class: "awake", title: "the service holds macOS's idle-sleep assertion" }, "agents running — keep the Mac awake (lid open or on power)"));
   if (S.snap.awake_error) parts.push(h("span", { class: "err" }, S.snap.awake_error));
+  if (!S.remote && S.snap.remote_host) {
+    parts.push(h("button", { type: "button", class: "chip", title: "devices that reach the board from https://" + S.snap.remote_host,
+      onclick: () => { S.inbox = false; S.selected = null; S.devices = true; render(); loadDevices(); } }, "devices"));
+  }
   const tg = S.snap.telegram;
   if (tg && tg.configured) parts.push(h("span", { class: "chip" + (tg.paired && !tg.error ? "" : " api"),
     title: tg.error || (tg.paired ? "questions go to Telegram" : "not paired: taskmoor telegram pair") }, "telegram " + (tg.paired ? "✓" : "?")));
@@ -993,9 +1124,17 @@ document.getElementById("project").addEventListener("change", (e) => {
   S.project = e.target.value; localSet("project", S.project);
   S.selected = null; S.feed = null; S.body = null; render();
 });
-document.getElementById("inbox-btn").addEventListener("click", () => { S.inbox = true; S.selected = null; render(); });
-const closePanel = () => { S.inbox = false; S.selected = null; S.feed = null; S.body = null; render(); };
+document.getElementById("inbox-btn").addEventListener("click", () => { S.inbox = true; S.devices = false; S.selected = null; render(); });
+const closePanel = () => { S.inbox = false; S.devices = false; S.selected = null; S.feed = null; S.body = null; render(); };
 document.getElementById("panel-close").addEventListener("click", closePanel);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePanel(); });
-window.addEventListener("hashchange", () => { signIn().then(() => { if (localGet("token")) refresh(); }); });
-signIn().then(() => { if (localGet("token")) refresh(); else showSignin(); });
+// the listener says whether this is the Mac's own board or a device's
+(async () => {
+  try { S.remote = !!(await (await fetch("/api/whoami")).json()).remote; } catch { S.remote = false; }
+  if (S.remote) {
+    if (localGet("device")) refresh(); else showSignin();
+    return;
+  }
+  window.addEventListener("hashchange", () => { signIn().then(() => { if (localGet("token")) refresh(); }); });
+  signIn().then(() => { if (localGet("token")) refresh(); else showSignin(); });
+})();

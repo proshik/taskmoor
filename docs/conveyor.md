@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-23; stages 1–7 of v1 are implemented, and stage 8 (v2: ideas and intake).**
+2026-11-23; stages 1–7 of v1 are implemented, and stages 8 and 9 of v2 (ideas and intake; the web from outside).**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -1558,6 +1558,101 @@ The smallest loop that runs a real agent on a real task.
    launch failed with nothing made starts again on Grill; `taskmoor
    continue` of a grilling prints the idea's next steps.
 
+### Stage 9 — the web from outside (v2)
+
+- The VPS path of C5 with C7's step-up and A10. The person's choices
+  (2026-11-24): Pocket ID with oauth2-proxy as the outer passkey sign-in
+  (A10's off-the-shelf component), go-webauthn/webauthn for the service's
+  own passkeys, and the VPS files prepared by taskmoor and applied by the
+  person (nothing deployed by taskmoor).
+
+#### Stage 9 — implementation decisions (2026-11-24)
+
+1. **A second listener.** With `remote_host` (the board's domain) and
+   `remote_port` set, `taskmoor serve` also listens on
+   `127.0.0.1:<remote_port>`, which only the reverse tunnel reaches (the
+   VPS's Caddy proxies to the tunnel's end on its own loopback). Requests
+   there are remote by where they arrive, never by a header: that
+   listener has no sign-in links, no API token, accepts only the Host
+   `remote_host` (with `:443` or its port), and serves the same API and
+   board. The Mac's own listener is unchanged and knows no device token.
+2. **Devices.** `taskmoor device pair` (the Mac's CLI or board) makes a
+   one-time code (10 characters, 10 minutes, one at a time, all codes
+   void after 10 wrong tries); on the device the board asks for it and a
+   name, then registers a passkey for `remote_host` (user verification
+   required, no attestation asked) with go-webauthn. The device gets a
+   random token, kept in the store only as a SHA-256 hash with the
+   passkey's credential (`<store>/devices.json`, 0600), and sends it as
+   `Authorization: Device <token>`. `taskmoor device list`, `revoke ID`
+   (its token, passkey, pending confirmations and open event stream end).
+3. **Step-up (C7, A10, A11).** From a device, Accept, Approve and an
+   answer that allows an agent's request get 428 naming the action
+   (`accept:<session>`, `approve:<idea>`, `allow:<ask>`); the board asks
+   the device's passkey for it (a fresh WebAuthn assertion, user
+   verification required, the signature counter checked) and retries
+   with a one-use grant for that action and device (2 minutes). A deny,
+   a question's answer, Say, Run and the rest need none. Remote requests
+   never reach opening Finder or an editor on the Mac, Telegram's
+   setup, pairing or devices.
+4. **The outer sign-in** is not the service's: Caddy's `forward_auth` to
+   oauth2-proxy, which signs in through Pocket ID (passkey-only OIDC);
+   oauth2-proxy and Pocket ID listen on the VPS's loopback, Caddy on the
+   host's network to reach the tunnel. Only the person has a Pocket ID
+   account.
+5. **The files.** `taskmoor remote files --vps USER@HOST --auth-domain D
+   [--vps-port N] [--key PATH] [--out DIR]` writes, by default under
+   `<store>/remote`: the Mac's launchd agent (`ssh -N -R
+   127.0.0.1:<vps-port>:127.0.0.1:<remote_port>`, BatchMode,
+   ExitOnForwardFailure, keep-alives, KeepAlive, its own key), the VPS's
+   `authorized_keys` line (`restrict,port-forwarding,permitlisten=…`,
+   no shell), `docker-compose.yml` with pinned images (Caddy 2.11.8,
+   Pocket ID v2.19.1, oauth2-proxy v7.15.5), the Caddyfile, `.env`
+   with a new Pocket ID encryption key and oauth2-proxy cookie secret
+   (0600; written once, `--force` for new ones) and a README of the
+   steps.
+6. **Checked** with a software passkey in the tests (real P-256
+   signatures through go-webauthn) and in Chrome with a WebAuthn virtual
+   authenticator on `localhost` (pairing, a step-up that allowed an
+   agent's request, a revoked device back at the pairing form).
+7. **Review r1** (10 findings, all fixed): an answer's body is one JSON
+   object, read by the step-up guard as the handler reads it (anything
+   after it is refused); Accept's grant names the session itself (a task
+   id or project resolves once and the request goes on with the session
+   id); step-up actions are only `accept|approve|allow:<id>`, at most 8
+   under way per device and 64 in all; a revocation is written before it
+   takes effect, so a failed one can be retried; the tunnel account gets
+   its own sshd policy (`AllowTcpForwarding remote`, `PermitListen`,
+   `PermitOpen none`, `GatewayPorts no`, no stream-local, agent, X11 or
+   TTY) beside the key's options, Caddy's admin API is off, and the
+   launchd agent checks the VPS's host key strictly (the README has the
+   first, verified connection); Pocket ID is reachable only from
+   `AUTH_OPEN_TO` (the person's own address) until its first account —
+   its administrator — exists; oauth2-proxy accepts Pocket ID's
+   unverified email of that account (nothing decides by email); the CLI
+   writes each file through a new temporary file of its mode; the Mac's
+   board has a Devices panel (pairing code, list, revoke).
+8. **Review r2** (19 findings, all fixed; the last round): a remote
+   request is read whole before its device and grant are checked, so a
+   slow upload cannot outlive a revocation or a grant; an answer must be a
+   JSON object (`null` is refused); a pairing finishes only while its code
+   is still the one issued, and no ceremony outlives its code; a passkey's
+   counter is written before a grant is given; a remote event stream ends
+   after 10 minutes and the board reconnects through the VPS's sign-in;
+   an API request whose VPS sign-in expired gets 401 with
+   `X-Taskmoor-Login: required` from Caddy and the board sends the page to
+   the sign-in (the device stays paired); Telegram's links point to the
+   board from outside when it is on; the tunnel's VPS port may not be
+   Pocket ID's or oauth2-proxy's; oauth2-proxy runs on the host network
+   on 127.0.0.1, Pocket ID's loopback publishing needs Docker Engine 28;
+   the README installs the sshd policy where sshd reads it and checks it
+   with `sshd -T` for the tunnel account (an earlier Match or a missing
+   Include shows), and the account's connections time out
+   (`ClientAliveInterval 30`) so a stale one lets go of the listener;
+   `.env` is written last and explains that its secrets belong to one
+   deployment (recreate, do not restart, after changing it). The Mac's
+   Devices button, broken in r2's commit by an edit of the agent's, was
+   fixed and checked in the browser.
+
 ### What each stage needs from the person
 
 | Stage | Decision or permission |
@@ -1570,6 +1665,7 @@ The smallest loop that runs a real agent on a real task.
 | 6 | The usage threshold. |
 | 7 | The bot token and the person's Telegram account id. |
 | 8 | Nothing new; a real grilling runs on the subscription. |
+| 9 | The outer sign-in, the WebAuthn library, who deploys; at the end the VPS, its domains and the deployment, which the person does. |
 
 ## Relation to Guild
 
