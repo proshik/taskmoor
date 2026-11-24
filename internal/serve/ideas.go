@@ -53,6 +53,10 @@ type Idea struct {
 	// Tasks are the ids the branch adds, as last seen.
 	Tasks  []string `json:"tasks,omitempty"`
 	Merged string   `json:"merged,omitempty"`
+	// ApprovedTip is the intake commit Approve landed (its tree is the
+	// landed commit's); CleanedUp, its worktree and branch were removed.
+	ApprovedTip string `json:"approved_tip,omitempty"`
+	CleanedUp   bool   `json:"cleaned_up,omitempty"`
 	// Approving is an Approve under way: written before main moves, so a
 	// crash between the two is finished at the next start (or Approve).
 	Approving *Approval `json:"approving,omitempty"`
@@ -286,7 +290,10 @@ func (s *Service) Grill(ctx context.Context, id string, req GrillRequest) (*Sess
 	}); err != nil {
 		return nil, err
 	}
-	if _, err := repo.Run(ctx, "worktree", "add", "-q", "-b", branch, wt, base); err != nil {
+	s.acceptMu.Lock() // as Run: never while a cleanup looks at the path
+	_, err = repo.Run(ctx, "worktree", "add", "-q", "-b", branch, wt, base)
+	s.acceptMu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 	undo := func(err error) error {
@@ -872,7 +879,7 @@ func (s *Service) Approve(ctx context.Context, id, tip, main string) (*ApproveRe
 		return nil, err
 	}
 	done, err := s.changeIdea(id, func(x *Idea) error {
-		x.State, x.Merged, x.Tasks, x.Approving = IdeaApproved, landed, ids, nil
+		x.State, x.Merged, x.Tasks, x.Approving, x.ApprovedTip = IdeaApproved, landed, ids, nil, tip
 		return nil
 	})
 	if err != nil {
@@ -933,7 +940,7 @@ func (s *Service) reconcileApproval(ctx context.Context, id string) error {
 			return nil
 		}
 		if finish {
-			x.State, x.Merged, x.Tasks = IdeaApproved, ap.Commit, ap.Tasks
+			x.State, x.Merged, x.Tasks, x.ApprovedTip = IdeaApproved, ap.Commit, ap.Tasks, ap.Tip
 		}
 		x.Approving = nil
 		return nil

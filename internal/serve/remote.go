@@ -567,7 +567,7 @@ func remoteBlocked(r *http.Request) bool {
 	switch {
 	case strings.HasSuffix(p, "/open") && strings.HasPrefix(p, "/api/sessions/"):
 		return true
-	case strings.HasPrefix(p, "/api/telegram/"), strings.HasPrefix(p, "/api/devices"),
+	case strings.HasPrefix(p, "/api/telegram/"), strings.HasPrefix(p, "/api/devices"), p == "/api/cleanup",
 		p == "/api/sign-in", p == "/api/proof", p == "/api/login-url":
 		return true
 	}

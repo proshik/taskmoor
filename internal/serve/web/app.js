@@ -603,6 +603,7 @@ function ideaView(p, i) {
   if (i.branch) facts.push(["branch", i.branch], ["worktree", i.worktree]);
   if (i.tasks && i.tasks.length) facts.push(["tasks", i.tasks.join(", ")]);
   if (i.merged) facts.push(["merged", i.merged.slice(0, 12)]);
+  if (i.cleaned_up) facts.push(["cleaned up", "the worktree and branch are removed"]);
   out.push(h("dl", { class: "facts-list" }, facts.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])));
   out.push(h("h3", {}, "The idea"), h("div", { class: "body" }, i.text || "(no text)"));
   const waiting = S.snap.asks.filter(a => a.session === i.session);
@@ -640,6 +641,7 @@ function ideaView(p, i) {
       catch (e) { err.textContent = e.message; }
     } }, "Drop the idea")));
   }
+  if (i.state === "approved" && !i.cleaned_up && i.branch && !S.remote) out.push(cleanupControl(i.id, i.worktree)); // the Mac's only
   out.push(err);
   if (sess) out.push(sessionView(sess));
   return out;
@@ -979,7 +981,8 @@ function sessionView(sess) {
 function acceptanceView(sess) {
   if (sess.state === "accepted") {
     const rvLine = sess.review ? " Review: " + sess.review.done + " of " + sess.review.rounds + " round(s), " + reviewState(sess.review, sess) + "." : "";
-    return h("p", {}, "Accepted: merged as " + (sess.merged || "").slice(0, 12) + "." + rvLine + " Push is yours.");
+    return [h("p", {}, "Accepted: merged as " + (sess.merged || "").slice(0, 12) + "." + rvLine + " Push is yours."),
+      sess.cleaned_up ? h("p", { class: "desc" }, "Cleaned up: its worktree and branch are removed.") : S.remote ? null : cleanupControl(sess.id, sess.worktree)];
   }
   const rv = sess.review;
   const box = h("div", { class: "acceptance" });
@@ -1035,6 +1038,24 @@ function acceptanceView(sess) {
     } }, "Send back")),
     err].flat(Infinity).filter(x => x != null)); // replaceChildren takes nodes only
   return box;
+}
+
+// cleanupControl removes merged work's worktree and branch (stage 12),
+// only if nothing is lost; files git ignores go only when asked.
+function cleanupControl(id, worktree) {
+  const err = h("div", { class: "err" });
+  const go = async () => {
+    err.textContent = "";
+    try {
+      const [it] = await api("POST", "/api/cleanup", { id });
+      if (it && it.removed) { banner("Cleaned up: the branch " + it.branch + " is deleted" + (it.trash ? ", the worktree is in " + it.trash : "") + "."); await refresh(); return; }
+      if (it && it.worktree_removed) { banner("The worktree is in the trash; the branch stays: " + it.kept); await refresh(); return; }
+      err.textContent = "Kept: " + ((it && it.kept) || "nothing to do");
+    } catch (e) { err.textContent = e.message; }
+  };
+  return h("div", {}, h("div", { class: "actions" }, h("button", { type: "button", onclick: () => {
+    if (confirmStep("Move the worktree " + worktree + " to the trash and delete its branch? Only if all of it is in main and nothing is uncommitted; nothing in it is deleted.")) go();
+  } }, "Clean up the worktree")), err);
 }
 
 // offerAnyway turns a refusal of the usage guard (the plan below the

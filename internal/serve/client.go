@@ -437,3 +437,20 @@ func (c *Client) Devices(ctx context.Context) ([]DeviceView, error) {
 func (c *Client) RevokeDevice(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, "/api/devices/"+url.PathEscape(id)+"/revoke", map[string]any{}, nil)
 }
+
+// Cleanup moves merged work's worktrees to the trash and deletes their
+// branches: one (id) or all of project (all).
+func (c *Client) Cleanup(ctx context.Context, id, project string, all, dryRun bool) ([]CleanupItem, error) {
+	var out []CleanupItem
+	err := c.do(ctx, http.MethodPost, "/api/cleanup", map[string]any{"id": id, "project": project, "all": all, "dry_run": dryRun}, &out)
+	return out, err
+}
+
+// EmptyTrash deletes what cleanup moved to the trash.
+func (c *Client) EmptyTrash(ctx context.Context, project string) ([]string, error) {
+	var out struct {
+		Emptied []string `json:"emptied"`
+	}
+	err := c.do(ctx, http.MethodPost, "/api/cleanup", map[string]any{"empty_trash": true, "project": project}, &out)
+	return out.Emptied, err
+}

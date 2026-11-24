@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-23; stages 1–7 of v1 are implemented, and stages 8 and 9 of v2 (ideas and intake; the web from outside), and stages 10–11 (the phone app, first of Later; a run on real tasks and its fixes).**
+2026-11-23; stages 1–7 of v1 are implemented, and stages 8 and 9 of v2 (ideas and intake; the web from outside), and stages 10–12 (the phone app, first of Later; a run on real tasks and its fixes; cleaning up).**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -1811,6 +1811,71 @@ The smallest loop that runs a real agent on a real task.
    push); git's packed-refs diagnostic in the sandbox (the commit itself
    takes the lock; the agent is told).
 
+### Stage 12 — cleaning up merged work
+
+- The person's choice (2026-11-24), after stage 11's run left eight
+  worktrees: a way to remove merged work's worktrees and branches. A7
+  stays: the service removes none on its own.
+
+#### Stage 12 — implementation decisions (2026-11-24)
+
+1. **What may go:** an accepted task's worktree and branch, when the
+   branch's tip is in main; an approved idea's, when its branch is at the
+   commit Approve landed (`approved_tip`, kept since this stage) and that
+   commit is in main. An idea approved before `approved_tip` was kept
+   goes only if its branch's tip is in main (an approval by merge); one
+   approved by the single landed commit (stage 8's final design) is kept
+   with that reason, for the person to remove by hand. Ancestry is read
+   with replacement objects off. Never a running session's, a released
+   task's or a dropped idea's.
+2. **Nothing is deleted from a worktree.** It is moved, whole, by one
+   rename, into the repository's trash beside the checkout
+   (`.<repo>-taskmoor-trash/<worktree>-<time>`): nested repositories,
+   ignored files, edits git's caches hide are all there. Git's record of
+   the worktree (its entry under `worktrees/`) is removed. Before the
+   move the directory must be, on disk, this repository's linked
+   worktree — a real directory, its `.git` file pointing into the
+   repository's `worktrees/`, that entry pointing back — on the branch,
+   with no change or untracked file git shows. The branch is deleted in
+   one `update-ref --no-deref --stdin` transaction that verifies main at
+   the commit the ancestry was checked against. `taskmoor cleanup
+   --empty-trash` deletes the trash: the person's explicit request.
+3. **Kept, with the reason:** a symbolic task ref, the branch checked out
+   in another worktree or held by a rebase or bisect there, another
+   session using the branch or path, a project now another checkout, a
+   worktree list that cannot be read. Run and Grill create worktrees
+   under the same lock cleanup holds, so a cleanup never takes what a new
+   run is making.
+4. **Clients:** `taskmoor cleanup [ID] [--project P] [--dry-run]
+   [--json]` — one (a task, session or idea id; an empty id is refused)
+   or all (no id); `--empty-trash`; it exits 1 when it kept any, in both
+   formats. The API wants an object naming `id` or `all` (nothing
+   malformed selects everything). The board's **Clean up the worktree**
+   on an accepted task's card and an approved idea's panel. The session's
+   (or the idea's grilling session's) record and feed say it was cleaned
+   up. Only from the Mac (refused from a paired device).
+5. **Review r1** (15 findings, five critical): data that git does not
+   show could be deleted (a nested repository, assume-unchanged edits, a
+   submodule's edits, files written during the cleanup) and a symbolic
+   task ref could delete main; also remote access, moved worktrees, other
+   sessions, a reused project name, main rewritten, legacy ideas, a
+   failed branch deletion, dry-run state, bulk errors, JSON exit status.
+6. **Review r2** (19 findings, eight critical; the last round): deleting
+   inside a worktree could still lose data through races and filesystem
+   tricks (a replacement checkout at a stale path, a symlinked parent or
+   root, `.GIT` on a case-insensitive volume, a nested bare repository,
+   stat settings hiding edits, files created after the last check) —
+   answered by point 2: cleanup deletes nothing in a worktree. Also fixed:
+   replacement objects, `no-deref` for the whole transaction, a second
+   checkout of the branch, a worktree list that fails, a rebase holding
+   the branch, a Run racing the cleanup, a `null` request and an empty id
+   selecting everything, the idea's session record, the legacy rule's
+   wording; and tests for the trash, the hidden data kept there, the
+   second checkout, the dry run with both already gone.
+7. **Checked:** real repositories in the tests; on stage 11's demo (with
+   the first version of this stage) the eight tasks' and two ideas'
+   worktrees and branches went, main untouched.
+
 ### What each stage needs from the person
 
 | Stage | Decision or permission |
@@ -1826,6 +1891,7 @@ The smallest loop that runs a real agent on a real task.
 | 9 | The outer sign-in, the WebAuthn library, who deploys; at the end the VPS, its domains and the deployment, which the person does. |
 | 10 | Push in or out, own code or a library; the real check on the phone after stage 9's deployment. |
 | 11 | Nothing new: a run on the demo project with real agents on the subscriptions. |
+| 12 | Nothing new. |
 
 ## Relation to Guild
 

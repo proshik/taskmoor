@@ -484,17 +484,25 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*Session, error) {
 	branch := "task/" + t.ID + "-" + slug
 	root := rep.Snapshot.Root
 	wt := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-"+strings.ToLower(t.ID))
+	repo := gitx.Repo{Dir: root}
+	base := rep.Snapshot.MainHead
+	// checked and made under the lock cleanup holds (stage 12): a cleanup
+	// never takes a path or branch this run is about to use
+	s.acceptMu.Lock()
 	if _, err := os.Lstat(wt); err == nil {
+		s.acceptMu.Unlock()
 		return nil, refusedf("%s already exists; the service does not reuse or remove worktrees (A7)", wt)
 	}
-	repo := gitx.Repo{Dir: root}
 	if _, ok, err := repo.ResolveBranch(ctx, branch); err != nil {
+		s.acceptMu.Unlock()
 		return nil, err
 	} else if ok {
+		s.acceptMu.Unlock()
 		return nil, refusedf("branch %s already exists; release or rename it first", branch)
 	}
-	base := rep.Snapshot.MainHead
-	if _, err := repo.Run(ctx, "worktree", "add", "-q", "-b", branch, wt, base); err != nil {
+	_, err = repo.Run(ctx, "worktree", "add", "-q", "-b", branch, wt, base)
+	s.acceptMu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 	id := newUUID()

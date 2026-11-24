@@ -174,6 +174,16 @@ model = "provider/model"
   arrive while the phone was offline (they are kept 6 hours at most).
   **sign out** (from outside) forgets the board on the device and ends the
   VPS's sign-in on a page of its own.
+- **Cleaning up (stage 12).** Accepted tasks' and approved ideas'
+  worktrees stay (the service never removes one on its own). `taskmoor
+  cleanup ID` or `taskmoor cleanup` (all; `--project P`, `--dry-run`) —
+  or **Clean up the worktree** on the card, on the Mac — moves each
+  worktree whose work is in main (the branch in main; an idea's at the
+  commit Approve landed), with no change git shows, whole into the
+  repository's trash beside it (`.<repo>-taskmoor-trash/`) and deletes
+  its branch. Nothing in a worktree is deleted: whatever git cannot see
+  there is in the trash. `taskmoor cleanup --empty-trash` deletes the
+  trash. What it keeps it names, with why.
 - **Telegram (stage 7).** Questions and approvals reach your Telegram:
   create a bot with @BotFather, then `taskmoor telegram setup` (the token
   is read from stdin, kept in the store with mode 0600, never shown) and

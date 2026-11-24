@@ -287,6 +287,36 @@ func (s *Service) apiMux(token string, port int) *http.ServeMux {
 		}
 		writeJSON(w, http.StatusOK, i)
 	})
+	mux.HandleFunc("POST /api/cleanup", func(w http.ResponseWriter, r *http.Request) {
+		// an object, naming one or saying all: nothing malformed selects
+		// everything
+		var body *struct {
+			ID         string `json:"id"`
+			Project    string `json:"project"`
+			All        bool   `json:"all"`
+			DryRun     bool   `json:"dry_run"`
+			EmptyTrash bool   `json:"empty_trash"`
+		}
+		if err := decode(r, &body); err != nil || body == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a JSON object naming id, or all"})
+			return
+		}
+		if body.EmptyTrash {
+			gone, err := s.EmptyTrash(body.Project)
+			if err != nil {
+				writeErr(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"emptied": gone})
+			return
+		}
+		items, err := s.Cleanup(context.WithoutCancel(r.Context()), body.ID, body.Project, body.All, body.DryRun)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
+	})
 	mux.HandleFunc("GET /api/telegram", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.TelegramStatus())
 	})

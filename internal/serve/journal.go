@@ -75,6 +75,9 @@ type Session struct {
 	// Review is the code review (A5); Merged the merge commit of Accept.
 	Review *Review `json:"review,omitempty"`
 	Merged string  `json:"merged,omitempty"`
+	// CleanedUp: its worktree and branch were removed after the merge
+	// (stage 12).
+	CleanedUp bool `json:"cleaned_up,omitempty"`
 	// ProjectPath is the registered repository the session belongs to: a
 	// project name reused for another repository does not inherit it.
 	ProjectPath string `json:"project_path,omitempty"`

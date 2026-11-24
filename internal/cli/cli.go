@@ -84,6 +84,7 @@ The service (taskmoor serve) and its clients:
   taskmoor remote files --vps USER@HOST --auth-domain D [--out DIR]  the tunnel and the VPS's files
   taskmoor acceptance ID [--diff] [--json]             the work to accept: commits, diff, review, checks
   taskmoor accept ID --tip C                           merge the task's branch at C into main (trial merge first)
+  taskmoor cleanup [ID] [--project P] [--dry-run] | --empty-trash  merged work's worktrees to the trash, branches deleted
   taskmoor override DECISION N [N…] | --text T          replace a dispatcher answer (sent to the session)
   taskmoor web [--print]                               open the board in the browser (a one-time sign-in link)
 
@@ -168,6 +169,8 @@ func Run(ctx context.Context, args []string, env Env) int {
 		return r.ideaCmd(ctx, rest)
 	case "device":
 		return r.deviceCmd(ctx, rest)
+	case "cleanup":
+		return r.cleanupCmd(ctx, rest)
 	case "remote":
 		return r.remoteCmd(ctx, rest)
 	case "acceptance":

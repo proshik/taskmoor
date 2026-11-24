@@ -187,7 +187,7 @@ func TestRemotePairingAndAccess(t *testing.T) {
 		t.Fatalf("%d %v", st, b)
 	}
 	// what acts on the Mac or its secrets is not reached from outside
-	for _, p := range []string{"/api/telegram/pair", "/api/sessions/x/open", "/api/devices/pair", "/api/proof"} {
+	for _, p := range []string{"/api/telegram/pair", "/api/sessions/x/open", "/api/devices/pair", "/api/proof", "/api/cleanup"} {
 		if st, _ := rc.do("POST", p, map[string]any{}, nil); st != 403 {
 			t.Fatalf("%s: %d", p, st)
 		}
