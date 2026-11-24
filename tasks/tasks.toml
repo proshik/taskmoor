@@ -1,0 +1,21 @@
+# taskmoor's own tasks (the taskmoor task format, format = 1; see spec/README.md).
+
+format = 1
+
+[project]
+id_prefix = "TM"
+main_branch = "main"
+
+# The binary ships by a release tag (v*, the release workflow); docs and CI
+# ship with the merge.
+[components.core]
+paths = ["cmd/**", "internal/**", "spec/**", "go.mod", "go.sum"]
+release = { rule = "tag", pattern = "v*" }
+
+[components.docs]
+paths = ["docs/**", "README.md", "AGENTS.md", "skills/**", "tasks/**", "LICENSE"]
+release = { rule = "merge" }
+
+[components.ci]
+paths = [".github/**", "scripts/**", "justfile", ".gitignore"]
+release = { rule = "merge" }

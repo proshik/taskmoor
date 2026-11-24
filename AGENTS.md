@@ -17,6 +17,9 @@ and how to use it; this file says how to change it.
   the parts your change touches before changing it; when it settles
   something new, record it there (as a numbered implementation decision
   of the stage, with why) and keep the README in step.
+- taskmoor's own work is planned in `tasks/` (its own format, prefix
+  `TM`): read the task you are given with `taskmoor show ID` and work to
+  its Acceptance, Checks and Limits.
 - The web board is plain JavaScript and CSS embedded from
   `internal/serve/web/` (no build step, no framework, no npm).
 

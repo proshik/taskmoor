@@ -517,6 +517,7 @@ internal/tui         the Bubble Tea board
 internal/serve       taskmoor serve: config, journal, rules, the Claude runner, API, client
 internal/testrepo    real git repositories for tests
 skills/taskmoor/     how an agent uses taskmoor
+tasks/               taskmoor's own tasks, in its own format
 docs/                the plan and the conveyor design
 ```
 
