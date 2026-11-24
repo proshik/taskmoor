@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-23; stages 1–7 of v1 are implemented.**
+2026-11-23; stages 1–7 of v1 are implemented, and stage 8 (v2: ideas and intake).**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -1460,6 +1460,104 @@ The smallest loop that runs a real agent on a real task.
    prompt restores the terminal; serve joins the bot's goroutines before
    it returns; the dispatcher test holds the dispatcher's reply.
 
+### Stage 8 — ideas and intake (v2)
+
+- Raw ideas, grilling through forms, intake on `intake/<id>` and Approve
+  into main (C8, C9, A22). Chosen by the person as the first part of v2
+  (2026-11-24), built without a design discussion at the person's word;
+  the calls below are the agent's.
+
+#### Stage 8 — implementation decisions (2026-11-24)
+
+1. **An idea** is a record in `<store>/ideas/<id>.json` (id `idea-` and 8
+   hex digits): project, title (the first line when none is given), the
+   raw text (at most 64 KB), state `new → grilling → proposed → approved`,
+   or `dropped`; the grilling's session, branch, worktree and base; the
+   task ids it adds; the merge commit. The transcript is the session's
+   journal in the store (C8): nothing of it reaches git but the tasks.
+2. **Grilling is a session** of the existing runners, not a new engine:
+   Grill makes `intake/<id>` from main's tip in `<repo-dir>-<id>` (A23's
+   rule), routes the profile as a `design` task would (tasks.toml
+   `routing.design`, `routing.default`, the default profile; `--profile`
+   wins), runs the same preflight, usage guard and sandbox, and sends a
+   first message that tells the agent to read the repository, grill the
+   idea through AskUserQuestion (one decision per question, the
+   recommended option first, each option's trade-off), write the tasks in
+   the repository's format with a Context summary (A22), validate them
+   with taskmoor and commit only `tasks/`. A grilling session has `idea`
+   set and no task: it holds no claim and writes no state file; Release,
+   Restart and Accept refuse it; it is not one of "keep N busy"'s N; its
+   resume and Continue in terminal work as a task session's.
+3. **Its questions are the person's:** the dispatcher never sees them
+   (the ask opens without a dispatch); they reach the inbox and Telegram
+   with the idea's id where a task id stands.
+4. **Proposed:** when the grilling's turn completes with commits on its
+   branch, the idea is `proposed` with the task ids it adds (read from the
+   worktree against main). Saying more to the session goes on grilling.
+5. **Approve (C9)** lands the intake at the commit the person looked at
+   on the local main as **one commit**: its tree is that commit's tree,
+   its parent main's tip, its message `Intake <id>` with `Tasks:` and
+   `Idea:` lines (the idea's id, never its raw title or text, C8; no
+   `Task:` trailer: it merges no task). The intake's own history stays on
+   its branch, so a file it committed and removed again never becomes
+   reachable from main. It goes through Accept's checks (the same
+   functions: the checkout on main and between operations, no untracked
+   or ignored file overwritten, `read-tree -m -u`, main moved by compare
+   and swap from the main it reviewed). Approve refuses while the grilling
+   runs, with nothing committed, with no task added, with uncommitted
+   changes in the worktree, with any change but a regular, not deleted
+   task file directly in `tasks/` or `tasks/tasks.toml` (listed from the
+   two trees with `diff-tree -z`, submodules included, no diff
+   configuration), and while the project, read at that commit as main
+   would be (`LoadAt`), does not validate: nothing on disk counts. The
+   tasks it adds are those of the commit not in the merge base. A main
+   that has moved since the branch was made is not landed on: Approve
+   sends the session "merge main, give your tasks ids that do not clash,
+   validate, commit" and reports it; the person looks again after. The
+   intended commit is written to the idea before main moves, so an
+   Approve a crash cuts off is finished (or cleared) at the next start,
+   review, Approve or Drop. The worktree and branch stay (A7); push stays
+   the person's.
+6. **Drop** stops the grilling and marks the idea dropped; the branch and
+   worktree stay. Approve and Drop hold the grilling's session (no Say or
+   resume starts meanwhile, one under way refuses them); every change of
+   an idea's record runs from copy to store under one lock, so a late
+   completion cannot undo a Drop. Grill writes its intent (session,
+   branch, worktree, base) before it makes them; a Grill cut off is
+   cleared by the next one if what it made is untouched. Review and
+   Approve check that the project is still the checkout the idea was
+   added to and that the worktree belongs to its repository.
+7. **Clients:** the CLI's `taskmoor idea add|list|show|grill|review|
+   approve|drop`; the board's Ideas column (new, grilling and proposed
+   ideas, **+ New idea**), whose panel holds the idea, Grill with a
+   profile choice, the review and Approve, Drop, and the grilling's
+   session and feed. The TUI does not show ideas yet.
+8. **Review r1** (17 findings, all fixed): validation of the commit, not
+   the worktree; the path check from the trees; one commit on main
+   instead of a merge (history, raw title); main pinned to the reviewed
+   one; added tasks against the merge base, so an id main took is sent
+   back; the approval intent and its reconciliation; Grill's intent and
+   leftovers; Approve and Drop holding the session; serialized idea
+   writes; the project and repository checks; the CLI sends the full
+   reviewed commit and says when the diff is cut; the inbox opens an
+   idea's question on the idea.
+9. **Review r2** (13 findings, all fixed; the last round): the review
+   validates the very commit Approve would land (the intake's tree on
+   main's tip, made with `commit-tree` and left unreferenced), so a
+   reference to an intake-only commit fails; with main moved, validation
+   errors do not hold back the send-back (they are checked again after);
+   Approve needs the main the person reviewed as well as the tip; the
+   diff is git's own (`--no-ext-diff --no-textconv`), and a diff or status
+   that cannot be read withholds readiness; an approval intent is
+   reconciled only under the ideas' lock and kept when git cannot answer,
+   and an Approve cut off between `read-tree` and `update-ref` (the index
+   at the approved tree, main at the old tip) is finished by moving main;
+   a runner being stopped counts as running until it has exited; a
+   Grill's leftovers are removed only if the worktree is this repository's,
+   on the intake branch, at the base and clean; a grilling whose first
+   launch failed with nothing made starts again on Grill; `taskmoor
+   continue` of a grilling prints the idea's next steps.
+
 ### What each stage needs from the person
 
 | Stage | Decision or permission |
@@ -1471,6 +1569,7 @@ The smallest loop that runs a real agent on a real task.
 | 5 | Nothing new (revust `codex-only` is already the route). |
 | 6 | The usage threshold. |
 | 7 | The bot token and the person's Telegram account id. |
+| 8 | Nothing new; a real grilling runs on the subscription. |
 
 ## Relation to Guild
 

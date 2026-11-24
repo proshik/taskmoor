@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -167,7 +168,34 @@ func turn(id any, params map[string]any) {
 		end("end_turn")
 		return
 	}
+	if strings.HasPrefix(prompt, "Approve found") { // bring the intake branch up to date
+		out, err := exec.Command("git", "merge", "--no-edit", "main").CombinedOutput()
+		say(fmt.Sprintf("merged main: %v %s", err, strings.TrimSpace(string(out))))
+		end("end_turn")
+		return
+	}
 	switch os.Getenv("FAKE_SCENARIO") {
+	case "grill": // asks one question, writes $FAKE_GRILL_FILE and commits it
+		res := request("elicitation/create", map[string]any{"sessionId": session, "mode": "form", "message": "Codex needs your input to continue.",
+			"requestedSchema": map[string]any{"type": "object", "required": []any{"scope"}, "properties": map[string]any{
+				"scope": map[string]any{"type": "string", "title": "How big is the first cut?",
+					"oneOf": []any{map[string]any{"const": "small", "title": "One small task (Recommended)"}, map[string]any{"const": "big", "title": "Three tasks"}}}}}})
+		content, _ := res["content"].(map[string]any)
+		say(fmt.Sprintf("answer: %v %v", res["action"], content["scope"]))
+		if f := os.Getenv("FAKE_GRILL_FILE"); f != "" {
+			_ = os.MkdirAll(filepath.Dir(f), 0o755)
+			_ = os.WriteFile(f, []byte(os.Getenv("FAKE_GRILL_BODY")), 0o644)
+			if o := os.Getenv("FAKE_GRILL_OUTSIDE"); o != "" {
+				_ = os.MkdirAll(filepath.Dir(o), 0o755)
+				_ = os.WriteFile(o, []byte("not a task\n"), 0o644)
+			}
+			out, err := exec.Command("git", "add", "-A").CombinedOutput()
+			if err == nil {
+				out, err = exec.Command("git", "commit", "-q", "-m", "tasks from the idea").CombinedOutput()
+			}
+			say(fmt.Sprintf("committed: %v %s", err, strings.TrimSpace(string(out))))
+		}
+		reply(id, map[string]any{"stopReason": "end_turn"})
 	case "wait":
 		say("Working.")
 		<-cancel

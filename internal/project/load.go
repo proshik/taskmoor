@@ -130,6 +130,16 @@ func loadErr(format string, args ...any) error {
 
 // Load reads the project containing dir.
 func (l *Loader) Load(ctx context.Context, dir string, src Source) (*Snapshot, error) {
+	return l.LoadAt(ctx, dir, src, "")
+}
+
+// LoadAt is Load with the main source read at commit at instead of the
+// main branch's tip ("" for the tip): the project as it would be if main
+// were at that commit (taskmoor serve validates an intake branch so).
+func (l *Loader) LoadAt(ctx context.Context, dir string, src Source, at string) (*Snapshot, error) {
+	if at != "" && src != SourceMain {
+		return nil, loadErr("a commit is read only as the main source")
+	}
 	sch, err := schema.Load()
 	if err != nil {
 		return nil, err
@@ -228,6 +238,13 @@ func (l *Loader) Load(ctx context.Context, dir string, src Source) (*Snapshot, e
 	}
 	if ok {
 		snap.MainHead = head
+	}
+	if at != "" {
+		c, err := repo.Run(ctx, "rev-parse", "-q", "--verify", at+"^{commit}")
+		if err != nil {
+			return nil, loadErr("commit %s cannot be read: %v", at, err)
+		}
+		snap.MainHead = strings.TrimSpace(string(c))
 	}
 
 	var files map[string][]byte // tasks/<name> → content

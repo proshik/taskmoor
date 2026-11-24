@@ -9,7 +9,7 @@
 "use strict";
 
 const COLUMNS = [
-  ["backlog", "Backlog"], ["ready", "Ready"], ["running", "Running"],
+  ["ideas", "Ideas"], ["backlog", "Backlog"], ["ready", "Ready"], ["running", "Running"],
   ["needs", "Needs you"], ["review", "Review"], ["merged", "Merged"], ["done", "Done"],
 ];
 const ENDED = new Set(["complete", "error", "stopped", "stale", "handedOver", "accepted"]);
@@ -17,6 +17,7 @@ const ENDED = new Set(["complete", "error", "stopped", "stale", "handedOver", "a
 const S = {
   snap: null,
   accept: {},           // acceptance views by session id, loaded on request
+  ideaReview: {},       // intake reviews by idea id, loaded on request
   project: localGet("project"),
   selected: null,       // {project, task} whose panel is open
   inbox: false,         // the inbox panel is open
@@ -328,12 +329,159 @@ function renderBoard() {
     const c = column(t, sessions.get(t.id));
     if (c) cols.get(c).push(t);
   }
+  const ideas = (S.snap.ideas || []).filter(i => i.project === p.name && (!i.project_path || i.project_path === p.path) &&
+    (i.state === "new" || i.state === "grilling" || i.state === "proposed"));
   board.replaceChildren(...COLUMNS.map(([k, name]) => {
+    if (k === "ideas") {
+      return h("section", { class: "col ideas" },
+        h("h2", {}, name + " ", h("span", {}, ideas.length)),
+        h("button", { type: "button", class: "add-idea", onclick: () => openNewIdea(p.name) }, "+ New idea"),
+        ideas.map(i => ideaCard(p.name, i)));
+    }
     const tasks = cols.get(k).sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
     return h("section", { class: "col" + (k === "needs" ? " needs" : "") },
       h("h2", {}, name + " ", h("span", {}, tasks.length)),
       tasks.length ? tasks.map(t => card(p.name, t, sessions.get(t.id), k)) : h("div", { class: "empty" }, "—"));
   }));
+}
+
+function ideaSession(i) { return i.session ? S.snap.sessions.find(s => s.id === i.session) : null; }
+
+function ideaCard(project, i) {
+  const sess = ideaSession(i);
+  const meta = [h("span", { class: "chip" }, i.state)];
+  if (sess && !ENDED.has(sess.state)) meta.push(h("span", { class: "st-" + sess.state }, "● " + stateWord(sess.state)));
+  if (i.tasks && i.tasks.length) meta.push(h("span", {}, i.tasks.join(", ")));
+  const waiting = sess && sess.state === "awaitingInput";
+  return h("article", {
+    class: "card idea" + (waiting ? " needs" : "") + (isSelected(project, i.id) ? " sel" : ""),
+    tabindex: "0", "data-idea": i.id,
+    onclick: () => openIdea(project, i.id),
+    onkeydown: (e) => { if (e.key === "Enter") openIdea(project, i.id); },
+  },
+  h("div", { class: "row" }, h("span", { class: "id" }, i.id)),
+  h("div", { class: "title" }, i.title),
+  h("div", { class: "meta" }, meta));
+}
+
+function openIdea(project, id) {
+  const fresh = !isSelected(project, id);
+  S.project = project; localSet("project", project);
+  S.selected = { project, task: id, idea: true }; S.inbox = false;
+  if (fresh) { S.feed = null; S.body = null; }
+  render();
+  if (fresh) document.getElementById("panel").scrollTop = 0;
+}
+
+function openNewIdea(project) {
+  S.project = project; localSet("project", project);
+  S.selected = { project, task: "", newIdea: true }; S.inbox = false; S.feed = null;
+  render();
+}
+
+function newIdeaView(project) {
+  const key = "idea:new:" + project;
+  const title = draft(h("input", { type: "text", placeholder: "A short title (or the first line below)" }), key + ":title");
+  const text = draft(h("textarea", { placeholder: "The raw idea, as it is…", rows: "8" }), key + ":text");
+  const err = h("div", { class: "err" });
+  const add = h("button", { type: "button", class: "primary", onclick: async () => {
+    if (!text.value.trim() && !title.value.trim()) return;
+    add.disabled = true; err.textContent = "";
+    try {
+      const i = await api("POST", "/api/ideas", { project, title: title.value, text: text.value });
+      forget(key);
+      await refresh();
+      openIdea(project, i.id);
+    } catch (e) { err.textContent = e.message; add.disabled = false; }
+  } }, "Keep the idea");
+  return [h("h1", {}, "New idea · " + project),
+    h("p", { class: "desc" }, "Kept in taskmoor's store, outside git. Grilling it starts an agent that asks you about it, in forms, and writes the tasks it comes to on an intake branch; you approve them into main."),
+    title, text, h("div", { class: "actions" }, add), err];
+}
+
+function ideaView(p, i) {
+  const sess = ideaSession(i);
+  const out = [h("h1", {}, i.id + "  " + i.title)];
+  const facts = [["state", i.state]];
+  if (i.branch) facts.push(["branch", i.branch], ["worktree", i.worktree]);
+  if (i.tasks && i.tasks.length) facts.push(["tasks", i.tasks.join(", ")]);
+  if (i.merged) facts.push(["merged", i.merged.slice(0, 12)]);
+  out.push(h("dl", { class: "facts-list" }, facts.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])));
+  out.push(h("h3", {}, "The idea"), h("div", { class: "body" }, i.text || "(no text)"));
+  const waiting = S.snap.asks.filter(a => a.session === i.session);
+  if (waiting.length) {
+    out.push(h("p", { class: "needs-note" }, "The grilling waits for you: " + waiting.length + " question(s) or approval(s). ",
+      h("button", { type: "button", class: "primary", onclick: () => { S.inbox = true; S.selected = null; render(); } }, "Answer in Needs you")));
+  }
+  const err = h("div", { class: "err" });
+  if (i.state === "new") {
+    const key = "grill:" + i.id;
+    const select = draft(h("select", { "aria-label": "Profile" },
+      h("option", { value: "" }, "Routed profile (tasks.toml routing.design, else the default)"),
+      S.snap.profiles.map(pr => h("option", { value: pr.name, disabled: !pr.runnable }, pr.name + " (" + pr.harness + (pr.model ? ", " + pr.model : "") + (pr.api_billing ? ", API key" : "") + ")" + (pr.runnable ? "" : " — not runnable")))), key + ":profile");
+    const go = async (anyway) => {
+      const s = await api("POST", `/api/ideas/${encodeURIComponent(i.id)}/grill`, { profile: select.value, anyway });
+      forget(key);
+      await refresh();
+      loadFeed(p.name, i.id, s.id);
+    };
+    const btn = h("button", { type: "button", class: "primary", onclick: async () => {
+      btn.disabled = true; err.textContent = "";
+      try { try { await go(false); } catch (e) { if (!offerAnyway(err, e, "Grill anyway", go)) throw e; } }
+      catch (e) { err.textContent = e.message; }
+      btn.disabled = false;
+    } }, "Grill it");
+    out.push(h("h3", {}, "Grill"), h("p", { class: "desc" }, "An agent reads the repository, asks you what it needs to know (the questions come to Needs you and Telegram), then writes the tasks on intake/" + i.id + "."),
+      h("div", { class: "actions" }, select, btn));
+  }
+  if (i.state === "proposed" || i.state === "grilling") out.push(ideaReviewView(i));
+  if (i.state !== "approved" && i.state !== "dropped") {
+    out.push(h("div", { class: "actions" }, h("button", { type: "button", class: "danger", onclick: async () => {
+      if (!confirmStep("Drop " + i.id + "? Its grilling stops; its branch and worktree stay.")) return;
+      err.textContent = "";
+      try { await api("POST", `/api/ideas/${encodeURIComponent(i.id)}/drop`, {}); await refresh(); }
+      catch (e) { err.textContent = e.message; }
+    } }, "Drop the idea")));
+  }
+  out.push(err);
+  if (sess) out.push(sessionView(sess));
+  return out;
+}
+
+// ideaReviewView is the intake's tasks and Approve (C9): loaded on request.
+function ideaReviewView(i) {
+  const box = h("div", { class: "acceptance" });
+  const err = h("div", { class: "err" });
+  const load = async () => {
+    err.textContent = "";
+    try { S.ideaReview[i.id] = await api("GET", `/api/ideas/${encodeURIComponent(i.id)}/review`); render(); }
+    catch (e) { err.textContent = e.message; }
+  };
+  const rv = S.ideaReview[i.id];
+  if (!rv) { box.replaceChildren(h("h3", {}, "Approve"), h("div", { class: "actions" }, h("button", { type: "button", onclick: load }, "Show the tasks to approve")), err); return box; }
+  box.replaceChildren(...[h("h3", {}, "Approve"),
+    h("p", {}, rv.ready ? "Ready to approve." : "Not ready: " + rv.why),
+    h("h3", {}, "Tasks it adds"),
+    rv.tasks.length ? h("ul", {}, rv.tasks.map(t => h("li", {}, h("span", { class: "mono" }, t.id), " " + t.title))) : h("p", { class: "empty" }, "None yet."),
+    (rv.errors || []).length ? h("ul", { class: "reasons" }, rv.errors.map(e => h("li", { class: "err" }, e))) : null,
+    (rv.warnings || []).length ? h("ul", { class: "reasons" }, rv.warnings.map(e => h("li", {}, e))) : null,
+    rv.main_moved ? h("p", { class: "desc" }, rv.main_branch + " has moved since the branch was made: Approve sends it back to its session to merge it in and check the ids first.") : null,
+    rv.result ? [h("h3", {}, "The agent's summary"), h("div", { class: "body" }, rv.result)] : null,
+    h("details", {}, h("summary", {}, "Diff" + (rv.diff_cut ? " (cut)" : "")), h("pre", { class: "mono body diff" }, rv.diff)),
+    h("div", { class: "actions" },
+      h("button", { type: "button", class: "primary", disabled: !rv.ready, onclick: async () => {
+        if (!confirmStep("Merge the tasks of " + i.branch + " at " + rv.tip.slice(0, 10) + " into " + rv.main_branch + "? Push stays yours.")) return;
+        err.textContent = "";
+        try {
+          const r = await api("POST", `/api/ideas/${encodeURIComponent(i.id)}/approve`, { tip: rv.tip, main: rv.main });
+          delete S.ideaReview[i.id];
+          banner(r.sent_back ? rv.main_branch + " has moved: sent back to the session to bring the branch up to date; look again when it is done." : "Approved: merged as " + (r.merged || "").slice(0, 12) + ". Push is yours.");
+          await refresh();
+        } catch (e) { err.textContent = e.message; }
+      } }, "Approve"),
+      h("button", { type: "button", onclick: load }, "Refresh")),
+    err].flat(Infinity).filter(x => x != null));
+  return box;
 }
 
 function isSelected(project, task) { return S.selected && S.selected.project === project && S.selected.task === task; }
@@ -428,6 +576,24 @@ function renderPanel() {
   const body = document.getElementById("panel-body");
   const show = (on) => { panel.hidden = !on; document.body.classList.toggle("has-panel", on); };
   if (S.inbox) { show(true); body.replaceChildren(...nodes(inboxView())); return; }
+  if (S.selected && S.selected.newIdea) { show(true); body.replaceChildren(...nodes(newIdeaView(S.selected.project))); return; }
+  if (S.selected && S.selected.idea) {
+    const ip = S.snap.projects.find(x => x.name === S.selected.project);
+    const idea = (S.snap.ideas || []).find(x => x.id === S.selected.task);
+    if (!ip || !idea) { show(false); return; }
+    show(true);
+    const isess = ideaSession(idea);
+    if (isess && S.feed && S.feed.session !== isess.id) S.feed = null;
+    const recent = isess && S.feedError[isess.id] && Date.now() - S.feedError[isess.id] < 5000;
+    if (isess && !recent && (!S.feed || S.feedAgain)) {
+      if (S.feedError[isess.id]) delete S.feedError[isess.id];
+      S.feedAgain = false;
+      loadFeed(ip.name, idea.id, isess.id);
+    }
+    body.replaceChildren(...nodes(ideaView(ip, idea)));
+    renderFeed();
+    return;
+  }
   const p = S.selected && S.snap.projects.find(x => x.name === S.selected.project);
   const t = p && p.tasks.find(x => x.id === S.selected.task);
   if (!t) { show(false); return; }
@@ -505,6 +671,7 @@ function sessionView(sess) {
   const running = !ENDED.has(sess.state);
   const mine = sess.state !== "handedOver"; // handed over: the person's now
   const sayKey = "say:" + sess.id;
+  const idea = !!sess.idea; // a grilling: no task, no Release, Restart or Accept
   const say = draft(h("textarea", { placeholder: running ? "An instruction for the agent…" : "An instruction resumes the conversation…" }), sayKey);
   return [h("h3", {}, "Session"),
     h("dl", { class: "facts-list" },
@@ -525,11 +692,11 @@ function sessionView(sess) {
       mine ? act("Continue in terminal", async () => {
         if (!confirmStep("Stop the agent and continue this conversation in your terminal?")) return;
         const r = await api("POST", `/api/sessions/${sid}/handover`, {});
-        await copy(r.resume); banner("Copied: " + r.resume + " — then `taskmoor review " + sess.task + "` when done.");
+        await copy(r.resume); banner("Copied: " + r.resume + (idea ? " — commit the tasks there, then Approve the idea here." : " — then `taskmoor review " + sess.task + "` when done."));
       }) : null,
       running ? act("Stop", () => api("POST", `/api/sessions/${sid}/stop`, {}), "danger") : null,
-      mine ? restartControl(sess, act) : null,
-      mine ? act("Release", async () => {
+      mine && !idea ? restartControl(sess, act) : null,
+      mine && !idea ? act("Release", async () => {
         if (!confirmStep("Release " + sess.task + "? The session stops and the claim goes; the worktree and branch stay.")) return;
         await api("POST", `/api/sessions/${sid}/release`, {});
       }, "danger") : null),
@@ -555,9 +722,9 @@ function sessionView(sess) {
         const cur = document.querySelector(`[data-draft="${CSS.escape(sayKey)}"]`);
         if (cur && cur.value === sent) cur.value = "";
       }
-    }, "primary"))) : h("p", { class: "empty" }, "This session continues in your terminal; finish with `taskmoor review " + sess.task + "`."),
+    }, "primary"))) : h("p", { class: "empty" }, idea ? "This grilling continues in your terminal; commit the tasks there, then Approve the idea." : "This session continues in your terminal; finish with `taskmoor review " + sess.task + "`."),
     err,
-    acceptanceView(sess),
+    idea ? null : acceptanceView(sess),
     h("h3", {}, "Feed"),
     h("ul", { class: "feed", id: "feed", "data-session": sess.id })];
 }
@@ -757,7 +924,9 @@ function decisionView(d) {
 function askForm(a) {
   const err = h("div", { class: "err" });
   const head = h("div", { class: "row" }, h("b", {}, a.project + " · " + a.task), " ", h("span", { class: "chip" }, a.kind), " ",
-    h("a", { href: "#", onclick: (e) => { e.preventDefault(); openTask(a.project, a.task); } }, "open the task"),
+    (S.snap.ideas || []).some(i => i.id === a.task && i.project === a.project)
+      ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); openIdea(a.project, a.task); } }, "open the idea")
+      : h("a", { href: "#", onclick: (e) => { e.preventDefault(); openTask(a.project, a.task); } }, "open the task"),
     a.dispatch ? h("div", { class: "desc" }, "dispatcher: " + a.dispatch) : null);
   const send = async (body) => {
     err.textContent = "";

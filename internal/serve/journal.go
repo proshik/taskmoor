@@ -38,9 +38,12 @@ const (
 
 // Session is one agent session the service runs.
 type Session struct {
-	ID        string `json:"id"` // the harness's own session id (claude --session-id)
-	Project   string `json:"project"`
-	Task      string `json:"task"`
+	ID      string `json:"id"` // the harness's own session id (claude --session-id)
+	Project string `json:"project"`
+	Task    string `json:"task"`
+	// Idea is the idea a grilling session grills (stage 8); Task is ""
+	// then.
+	Idea      string `json:"idea,omitempty"`
 	Title     string `json:"title"`
 	Profile   string `json:"profile"`
 	Harness   string `json:"harness"`

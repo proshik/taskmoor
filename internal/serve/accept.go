@@ -47,6 +47,9 @@ func (s *Service) Acceptance(ctx context.Context, id string) (*Acceptance, error
 	if err != nil {
 		return nil, err
 	}
+	if l.s.Idea != "" {
+		return nil, refusedf("session %s grills idea %s: its tasks are approved with the idea (taskmoor idea review %s)", l.s.ID, l.s.Idea, l.s.Idea)
+	}
 	if err := s.attach(l); err != nil {
 		return nil, err
 	}
@@ -207,6 +210,9 @@ func (s *Service) Accept(ctx context.Context, id, tip string) (*AcceptResult, er
 	if err != nil {
 		return nil, err
 	}
+	if l.s.Idea != "" {
+		return nil, refusedf("session %s grills idea %s: approve the idea instead (taskmoor idea approve %s)", l.s.ID, l.s.Idea, l.s.Idea)
+	}
 	if err := s.attach(l); err != nil {
 		return nil, err
 	}
@@ -234,59 +240,16 @@ func (s *Service) Accept(ctx context.Context, id, tip string) (*AcceptResult, er
 		l.handingOver = false
 		s.mu.Unlock()
 	}()
-	root, mainRef := l.rules.MainCheckout, "refs/heads/"+l.rules.MainBranch
+	root := l.rules.MainCheckout
 	main := gitx.Repo{Dir: root}
-	rev := func(ref string) string {
-		out, err := main.Run(ctx, "rev-parse", "-q", "--verify", ref+"^{commit}")
-		if err != nil {
-			return ""
-		}
-		return strings.TrimSpace(string(out))
+	msg := fmt.Sprintf("Merge %s: %s\n\nTask: %s\n", l.s.Branch, l.s.Title, l.s.Task)
+	mr, err := mergeIntoMain(ctx, root, l.rules.MainBranch, l.s.Branch, tip, msg, "taskmoor accept "+l.s.Task)
+	if err != nil {
+		return nil, err
 	}
-	cur := rev("refs/heads/" + l.s.Branch)
-	switch {
-	case cur == "":
-		return nil, refusedf("branch %s is gone", l.s.Branch)
-	case cur != tip:
-		return nil, refusedf("%s moved since you looked (now %s, you saw %s): look again before Accept", l.s.Branch, short12(cur), short12(tip))
-	}
-	for _, op := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"} {
-		if rev(op) != "" {
-			return nil, refusedf("%s is in the middle of a %s (%s): finish or abort it yourself, then Accept", root, strings.ToLower(strings.TrimSuffix(op, "_HEAD")), op)
-		}
-	}
-	for _, d := range []string{"rebase-merge", "rebase-apply"} {
-		if p, err := main.Run(ctx, "rev-parse", "--git-path", d); err == nil {
-			path := strings.TrimSpace(string(p))
-			if !filepath.IsAbs(path) {
-				path = filepath.Join(root, path)
-			}
-			if _, err := os.Stat(path); err == nil {
-				return nil, refusedf("%s is in the middle of a rebase: finish or abort it yourself, then Accept", root)
-			}
-		}
-	}
-	head, err := main.Run(ctx, "symbolic-ref", "-q", "HEAD")
-	if err != nil || strings.TrimSpace(string(head)) != mainRef {
-		return nil, refusedf("%s is not on %s (it is on %s); taskmoor never switches your checkout: switch it, then Accept",
-			root, l.rules.MainBranch, strings.TrimSpace(string(head)))
-	}
-	mainTip := rev("HEAD")
-	if _, err := main.Run(ctx, "merge-base", "--is-ancestor", cur, mainTip); err == nil {
-		return nil, refusedf("nothing to merge: %s's commits are already in %s", l.s.Branch, l.rules.MainBranch)
-	}
-	// the trial, of the two commits themselves
-	tout, terr := main.Run(ctx, "merge-tree", "--write-tree", "--name-only", "--no-messages", mainTip, cur)
-	if terr != nil {
-		if gitx.ExitCode(terr) != 1 {
-			return nil, fmt.Errorf("the trial merge failed: %v", terr)
-		}
-		var files []string
-		for _, f := range strings.Split(strings.TrimSpace(string(tout)), "\n")[1:] { // after the tree id
-			if f != "" {
-				files = append(files, f)
-			}
-		}
+	cur, merged := mr.Tip, mr.Merged
+	if mr.Conflicted {
+		files := mr.Conflicts
 		where := "conflicts"
 		if len(files) > 0 {
 			where = "conflicts in " + strings.Join(files, ", ")
@@ -304,41 +267,6 @@ func (s *Service) Accept(ctx context.Context, id, tip string) (*AcceptResult, er
 		}
 		s.addActivity(l, Activity{Type: ActResponse, Text: "accept: " + where + " with " + l.rules.MainBranch + "; sent back", By: "person"})
 		return &AcceptResult{Conflicted: true, Conflicts: files, Session: s.snapshotSession(l.s.ID)}, nil
-	}
-	tree := strings.TrimSpace(strings.SplitN(string(tout), "\n", 2)[0])
-	// nothing the merge writes may land on, under or over a file git does
-	// not track here (untracked or ignored): git's own checks do not
-	// protect ignored files, so taskmoor checks every path itself
-	if hit, err := untrackedInTheWay(ctx, main, root, mainTip, tree); err != nil {
-		return nil, fmt.Errorf("checking the checkout: %w", err)
-	} else if len(hit) > 0 {
-		return nil, refusedf("the merge would write over files in %s that git does not track (untracked or ignored): %s; move them, then Accept", root, strings.Join(hit, ", "))
-	}
-	// the merge commit itself: the trial's tree, the two commits as parents,
-	// the exact message; no strategy, merge option, merge.log or hook of the
-	// person's config can change what goes in
-	msg := fmt.Sprintf("Merge %s: %s\n\nTask: %s\n", l.s.Branch, l.s.Title, l.s.Task)
-	out, err := main.RunInput(ctx, strings.NewReader(msg), "commit-tree", tree, "-p", mainTip, "-p", cur)
-	if err != nil {
-		return nil, fmt.Errorf("making the merge commit: %w", err)
-	}
-	merged := strings.TrimSpace(string(out))
-	// the checkout: the index and the files move from main's tip to the
-	// merge; read-tree refuses when the person's changes are in the way
-	if h, _ := main.Run(ctx, "symbolic-ref", "-q", "HEAD"); strings.TrimSpace(string(h)) != mainRef {
-		return nil, refusedf("%s left %s meanwhile; nothing was merged", root, l.rules.MainBranch)
-	}
-	if _, err := main.Run(ctx, "read-tree", "-m", "-u", mainTip, merged); err != nil {
-		return nil, refusedf("git refused to update %s (your changes are in the way; nothing was merged): %v", root, err)
-	}
-	// main moves only from the tip that was checked (compare and swap)
-	if _, err := main.Run(ctx, "update-ref", "-m", "taskmoor accept "+l.s.Task, mainRef, merged, mainTip); err != nil {
-		_, rerr := main.Run(context.WithoutCancel(ctx), "read-tree", "-m", "-u", merged, mainTip) // the files back
-		state := "the files are back as they were"
-		if rerr != nil {
-			state = "the files could not be put back (" + rerr.Error() + "): look at " + root
-		}
-		return nil, refusedf("%s moved meanwhile, so nothing was merged (%s): %v", l.rules.MainBranch, state, err)
 	}
 	if !hasTrailer(ctx, main, merged, l.s.Task) {
 		return nil, fmt.Errorf("merged as %s, but its message has no readable `Task: %s` trailer: look at it; the task keeps its claim", short12(merged), l.s.Task)
@@ -472,4 +400,144 @@ func untrackedInTheWay(ctx context.Context, repo gitx.Repo, root, mainTip, tree 
 		hit = append(hit[:10], "…")
 	}
 	return hit, nil
+}
+
+// mergeResult is what mergeIntoMain did.
+type mergeResult struct {
+	Tip        string // the branch's commit that was merged
+	Merged     string // the merge commit
+	Conflicted bool
+	Conflicts  []string
+}
+
+// mergeIntoMain merges branch at tip into mainBranch in the checkout at
+// root (Accept's and Approve's merge, A8, C9): a trial of the two commits
+// first, no file git does not track overwritten, the merge commit made
+// with msg, the checkout moved with read-tree, main moved by compare and
+// swap. A conflict merges nothing and is reported in the result.
+func mergeIntoMain(ctx context.Context, root, mainBranch, branch, tip, msg, reflog string) (*mergeResult, error) {
+	main := gitx.Repo{Dir: root}
+	cur, mainTip, err := checkoutReady(ctx, root, mainBranch, branch, tip)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := main.Run(ctx, "merge-base", "--is-ancestor", cur, mainTip); err == nil {
+		return nil, refusedf("nothing to merge: %s's commits are already in %s", branch, mainBranch)
+	}
+	// the trial, of the two commits themselves
+	tout, terr := main.Run(ctx, "merge-tree", "--write-tree", "--name-only", "--no-messages", mainTip, cur)
+	if terr != nil {
+		if gitx.ExitCode(terr) != 1 {
+			return nil, fmt.Errorf("the trial merge failed: %v", terr)
+		}
+		var files []string
+		for _, f := range strings.Split(strings.TrimSpace(string(tout)), "\n")[1:] { // after the tree id
+			if f != "" {
+				files = append(files, f)
+			}
+		}
+		return &mergeResult{Tip: cur, Conflicted: true, Conflicts: files}, nil
+	}
+	tree := strings.TrimSpace(strings.SplitN(string(tout), "\n", 2)[0])
+	// the merge commit itself: the trial's tree, the two commits as parents,
+	// the exact message; no strategy, merge option, merge.log or hook of the
+	// person's config can change what goes in
+	merged, err := landTree(ctx, root, mainBranch, mainTip, tree, []string{mainTip, cur}, msg, reflog, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &mergeResult{Tip: cur, Merged: merged}, nil
+}
+
+// checkoutReady checks the main checkout before a merge: branch is still
+// at tip, no merge, cherry-pick, revert or rebase is under way, and the
+// checkout is on mainBranch. It returns the branch's commit and main's.
+func checkoutReady(ctx context.Context, root, mainBranch, branch, tip string) (cur, mainTip string, err error) {
+	mainRef := "refs/heads/" + mainBranch
+	main := gitx.Repo{Dir: root}
+	rev := func(ref string) string {
+		out, err := main.Run(ctx, "rev-parse", "-q", "--verify", ref+"^{commit}")
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	cur = rev("refs/heads/" + branch)
+	switch {
+	case cur == "":
+		return "", "", refusedf("branch %s is gone", branch)
+	case cur != tip:
+		return "", "", refusedf("%s moved since you looked (now %s, you saw %s): look again before merging", branch, short12(cur), short12(tip))
+	}
+	for _, op := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"} {
+		if rev(op) != "" {
+			return "", "", refusedf("%s is in the middle of a %s (%s): finish or abort it yourself, then try again", root, strings.ToLower(strings.TrimSuffix(op, "_HEAD")), op)
+		}
+	}
+	for _, d := range []string{"rebase-merge", "rebase-apply"} {
+		if p, err := main.Run(ctx, "rev-parse", "--git-path", d); err == nil {
+			path := strings.TrimSpace(string(p))
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(root, path)
+			}
+			if _, err := os.Stat(path); err == nil {
+				return "", "", refusedf("%s is in the middle of a rebase: finish or abort it yourself, then try again", root)
+			}
+		}
+	}
+	head, err := main.Run(ctx, "symbolic-ref", "-q", "HEAD")
+	if err != nil || strings.TrimSpace(string(head)) != mainRef {
+		return "", "", refusedf("%s is not on %s (it is on %s); taskmoor never switches your checkout: switch it, then try again",
+			root, mainBranch, strings.TrimSpace(string(head)))
+	}
+	return cur, rev("HEAD"), nil
+}
+
+// landTree makes a commit of tree with parents and msg and moves main to
+// it from mainTip: no file git does not track is overwritten, the checkout
+// moves with read-tree (which refuses when the person's changes are in
+// the way), and main moves by compare and swap, the files put back if it
+// moved meanwhile. before, if set, runs once the commit exists and before
+// anything changes (its error stops it).
+func landTree(ctx context.Context, root, mainBranch, mainTip, tree string, parents []string, msg, reflog string, before func(commit string) error) (string, error) {
+	mainRef := "refs/heads/" + mainBranch
+	main := gitx.Repo{Dir: root}
+	// nothing written may land on, under or over a file git does not track
+	// here (untracked or ignored): git's own checks do not protect ignored
+	// files, so taskmoor checks every path itself
+	if hit, err := untrackedInTheWay(ctx, main, root, mainTip, tree); err != nil {
+		return "", fmt.Errorf("checking the checkout: %w", err)
+	} else if len(hit) > 0 {
+		return "", refusedf("the merge would write over files in %s that git does not track (untracked or ignored): %s; move them, then try again", root, strings.Join(hit, ", "))
+	}
+	args := []string{"commit-tree", tree}
+	for _, p := range parents {
+		args = append(args, "-p", p)
+	}
+	out, err := main.RunInput(ctx, strings.NewReader(msg), args...)
+	if err != nil {
+		return "", fmt.Errorf("making the commit: %w", err)
+	}
+	merged := strings.TrimSpace(string(out))
+	if before != nil {
+		if err := before(merged); err != nil {
+			return "", err
+		}
+	}
+	if h, _ := main.Run(ctx, "symbolic-ref", "-q", "HEAD"); strings.TrimSpace(string(h)) != mainRef {
+		return "", refusedf("%s left %s meanwhile; nothing was merged", root, mainBranch)
+	}
+	if _, err := main.Run(ctx, "read-tree", "-m", "-u", mainTip, merged); err != nil {
+		return "", refusedf("git refused to update %s (your changes are in the way; nothing was merged): %v", root, err)
+	}
+	// main moves only from the tip that was checked (compare and swap)
+	if _, err := main.Run(ctx, "update-ref", "-m", reflog, mainRef, merged, mainTip); err != nil {
+		_, rerr := main.Run(context.WithoutCancel(ctx), "read-tree", "-m", "-u", merged, mainTip) // the files back
+		state := "the files are back as they were"
+		if rerr != nil {
+			state = "the files could not be put back (" + rerr.Error() + "): look at " + root
+		}
+		return "", refusedf("%s moved meanwhile, so nothing was merged (%s): %v", mainBranch, state, err)
+	}
+	return merged, nil
 }

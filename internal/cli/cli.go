@@ -76,6 +76,10 @@ The service (taskmoor serve) and its clients:
   taskmoor decisions [--json]                          what the dispatcher answered, and why
   taskmoor usage [--json]                              each plan's share left and the start guard
   taskmoor telegram setup | pair | status | off        the bot: token from stdin, one-time pairing
+  taskmoor idea add [--project P] [--title T] TEXT|-   keep a raw idea (stage 8)
+  taskmoor idea list | show ID | drop ID               the ideas
+  taskmoor idea grill ID [--profile P] [--anyway]      an agent grills it with you and writes its tasks
+  taskmoor idea review ID [--diff] | approve ID --tip C --main M  look at its tasks; land them on main
   taskmoor acceptance ID [--diff] [--json]             the work to accept: commits, diff, review, checks
   taskmoor accept ID                                   merge the task's branch into main (trial merge first)
   taskmoor override DECISION N [N…] | --text T          replace a dispatcher answer (sent to the session)
@@ -158,6 +162,8 @@ func Run(ctx context.Context, args []string, env Env) int {
 		return r.usageCmd(ctx, rest)
 	case "telegram":
 		return r.telegramCmd(ctx, rest)
+	case "idea":
+		return r.ideaCmd(ctx, rest)
 	case "acceptance":
 		return r.acceptanceCmd(ctx, rest)
 	case "accept":

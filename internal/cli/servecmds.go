@@ -141,6 +141,10 @@ func (r runner) handoverCmd(ctx context.Context, args []string) int {
 	if err != nil {
 		return r.serviceFail(err, false)
 	}
+	if s.Idea != "" {
+		fmt.Fprintf(r.env.Stdout, "the grilling of %s is yours now; continue it with:\n  %s\nthen commit the tasks there and approve them: taskmoor idea review %s\n", s.Idea, cmd, s.Idea)
+		return ExitOK
+	}
 	fmt.Fprintf(r.env.Stdout, "%s is yours now; continue it with:\n  %s\nthen finish with taskmoor review %s\n", s.Task, cmd, s.Task)
 	return ExitOK
 }

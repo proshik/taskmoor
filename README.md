@@ -130,6 +130,19 @@ model = "provider/model"
   automatic start whose agent fails after the claim (no answer from the
   agent, a refused sign-in) leaves the task claimed with the session in
   error and its slot free: Restart it with a profile, or Release it.
+- **Ideas and intake (stage 8, v2).** `taskmoor idea add --title T TEXT`
+  (or **+ New idea** in the board's Ideas column) keeps a raw idea in the
+  service's store, outside git. `taskmoor idea grill ID` starts an agent
+  on a branch `intake/<id>` in its own worktree: it reads the repository,
+  asks you what it needs to know in forms (Needs you and Telegram; never
+  the dispatcher), then writes the agreed tasks under `tasks/` and commits
+  them. `taskmoor idea review ID [--diff]` shows the tasks it adds, as
+  committed, their validation and the diff; `taskmoor idea approve ID
+  --tip C --main M` (both as the review prints them) lands them on the local main as one commit (only task files in
+  `tasks/` and `tasks/tasks.toml`, and only if they validate at that
+  commit; the intake's own history stays on its branch; if main has
+  moved, the branch goes back to its session to be brought up to date
+  first). Push stays yours; the worktree and branch stay. `taskmoor idea list | show | drop`.
 - **Telegram (stage 7).** Questions and approvals reach your Telegram:
   create a bot with @BotFather, then `taskmoor telegram setup` (the token
   is read from stdin, kept in the store with mode 0600, never shown) and

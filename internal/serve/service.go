@@ -50,7 +50,10 @@ type Service struct {
 	awake       awake
 	pid         int
 	acceptMu    sync.Mutex // one merge at a time
-	decCache    []Ruling   // nil: read the store again
+	ideaMu      sync.Mutex // grilling, approving and dropping ideas, one at a time
+	ideaSave    sync.Mutex // an idea's record, from copy to store
+	ideas       map[string]*Idea
+	decCache    []Ruling // nil: read the store again
 
 	journal *journal
 	bus     *bus
@@ -216,8 +219,14 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 		UsageClaude: readClaudeUsage, UsageCodex: readCodexUsage, pid: os.Getpid(),
 		usage:   usageState{last: map[string]Usage{}, pause: map[string]time.Time{}},
 		tg:      newTelegram(),
-		journal: j, bus: newBus(), sessions: map[string]*live{}, asks: map[string]*Ask{}, owners: map[string]*os.File{}}
+		journal: j, bus: newBus(), sessions: map[string]*live{}, asks: map[string]*Ask{}, owners: map[string]*os.File{},
+		ideas: map[string]*Idea{}}
 	s.auth = newWebAuth(func() time.Time { return s.Now() }, filepath.Join(paths.Store, "web-sessions.json"))
+	if err := s.loadIdeas(); err != nil {
+		lock.Close()
+		return nil, err
+	}
+	s.reconcileIdeas() // an Approve a crash cut off
 	old, err := j.sessions()
 	if err != nil {
 		lock.Close()
@@ -287,6 +296,12 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 			l.s.Review = &cp
 			_ = j.saveSession(l.s)
 		}
+		if l.s.Idea != "" {
+			if l.app != nil && l.s.State == StateComplete && s.ownsIdea(l) {
+				go s.ideaSessionEnded(l) // a crash between the completion and the proposal
+			}
+			continue
+		}
 		if l.app != nil && l.s.State == StateComplete && rv == nil && s.ownsClaim(l) {
 			if lc, err := s.lifecycle(l); err == nil && lc == state.Review {
 				go s.afterComplete(l)
@@ -329,7 +344,12 @@ func (s *Service) appFor(p Project) *app.App {
 
 func ownerKey(stateDir, task string) string { return stateDir + "\x00" + task }
 
-func (s *Service) holdOwner(l *live) error { return s.holdOwnerIn(l.stateDir, l.s.Task) }
+func (s *Service) holdOwner(l *live) error {
+	if l.s.Idea != "" {
+		return nil // a grilling has no task to hold
+	}
+	return s.holdOwnerIn(l.stateDir, l.s.Task)
+}
 
 func (s *Service) holdOwnerIn(stateDir, task string) error {
 	key := ownerKey(stateDir, task)
@@ -350,6 +370,9 @@ func (s *Service) holdOwnerIn(stateDir, task string) error {
 }
 
 func (s *Service) dropOwner(l *live) {
+	if l.s.Idea != "" {
+		return
+	}
 	key := ownerKey(l.stateDir, l.s.Task)
 	s.mu.Lock()
 	f := s.owners[key]
@@ -363,6 +386,9 @@ func (s *Service) dropOwner(l *live) {
 // ownsClaim reports whether the task's state file is this session's: its
 // harness session and worktree.
 func (s *Service) ownsClaim(l *live) bool {
+	if l.s.Idea != "" {
+		return s.ownsIdea(l) // a grilling's claim is its idea
+	}
 	sch, err := schemaLoad()
 	if err != nil {
 		return false
@@ -378,6 +404,9 @@ func claimIs(f *state.File, s *Session) bool {
 // update rewrites the task's state file if its claim is still this
 // session's.
 func (s *Service) update(l *live, change func(*state.File)) error {
+	if l.s.Idea != "" {
+		return nil // no task state file: the idea's record is the state
+	}
 	_, err := l.app.UpdateState(context.Background(), l.s.Task, func(f *state.File) error {
 		if !claimIs(f, l.s) {
 			return errNotOurs
@@ -958,6 +987,9 @@ func (s *Service) Release(ctx context.Context, id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if l.s.Idea != "" {
+		return "", refusedf("session %s grills idea %s: drop the idea instead (taskmoor idea drop %s)", l.s.ID, l.s.Idea, l.s.Idea)
+	}
 	s.mu.Lock()
 	if l.starting || l.handingOver {
 		s.mu.Unlock()
@@ -1143,7 +1175,7 @@ func (s *Service) lookup(id, project string) (*live, error) {
 	var best *live
 	projects := map[string]bool{}
 	for _, l := range s.sessions {
-		if l.s.Task != id || (project != "" && l.s.Project != project) || l.s.RestartedAs != "" || l.s.Abandoned {
+		if id == "" || (l.s.Task != id && l.s.Idea != id) || (project != "" && l.s.Project != project) || l.s.RestartedAs != "" || l.s.Abandoned {
 			continue
 		}
 		projects[l.s.Project] = true
@@ -1209,6 +1241,8 @@ type Snapshot struct {
 	AwakeError    string  `json:"awake_error,omitempty"`
 	// Telegram is the bot's state (stage 7).
 	Telegram *TelegramStatus `json:"telegram"`
+	// Ideas are the raw ideas and their grilling (stage 8), newest first.
+	Ideas []Idea `json:"ideas"`
 	// Decisions are the dispatcher's latest decisions; Dispatcher names its
 	// profile ("" when it is off).
 	Decisions  []Ruling `json:"decisions"`
@@ -1261,6 +1295,7 @@ func (s *Service) Snapshot(ctx context.Context) (*Snapshot, error) {
 		Dispatcher: cfg.DispatcherProfile, Usage: s.Usages(), Threshold: s.threshold()}
 	out.AgentsRunning, out.AwakeError = s.AgentsRunning()
 	out.Telegram = s.TelegramStatus()
+	out.Ideas = s.Ideas()
 	// the 30 latest the dispatcher answered: those the person may override
 	out.Decisions = []Ruling{}
 	if ds, err := s.Decisions(0); err == nil {
@@ -1498,6 +1533,9 @@ func (s *Service) openAsk(l *live, a *Ask) {
 	s.mu.Lock()
 	a.ID = newID()
 	a.Session, a.Project, a.Task = l.s.ID, l.s.Project, l.s.Task
+	if l.s.Idea != "" {
+		a.Task = l.s.Idea // where the board and Telegram show it
+	}
 	a.CreatedAt = stamp(s.Now())
 	s.asks[a.ID] = a
 	s.order = append(s.order, a.ID)

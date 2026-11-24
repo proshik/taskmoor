@@ -71,7 +71,7 @@ func (h *sessionHost) permission(requestID, tool string, input map[string]any) {
 			return
 		}
 		a := &Ask{Kind: "question", Questions: qs, Tool: tool, requestID: requestID, input: input}
-		if cfg, err := h.s.Config(); err == nil && cfg.DispatcherProfile != "" {
+		if cfg, err := h.s.Config(); err == nil && cfg.DispatcherProfile != "" && h.l.s.Idea == "" { // an idea's questions are the person's
 			// decided as it opens: Telegram holds it for the dispatcher
 			a.Dispatch = "the dispatcher is looking"
 		}

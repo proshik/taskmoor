@@ -22,6 +22,9 @@ func (s *Service) Restart(ctx context.Context, id, profile string, anyway bool) 
 	if err != nil {
 		return nil, err
 	}
+	if l.s.Idea != "" {
+		return nil, refusedf("session %s grills idea %s: a grilling is not restarted under another profile", l.s.ID, l.s.Idea)
+	}
 	cfg, err := s.Config()
 	if err != nil {
 		return nil, err
@@ -224,8 +227,8 @@ func (s *Service) busy(project, path string) int {
 	defer s.mu.Unlock()
 	n := 0
 	for _, l := range s.sessions {
-		if l.s.Project != project || (l.s.ProjectPath != "" && l.s.ProjectPath != path) {
-			continue
+		if l.s.Project != project || (l.s.ProjectPath != "" && l.s.ProjectPath != path) || l.s.Idea != "" {
+			continue // a grilling is not one of the N
 		}
 		switch {
 		case l.starting, l.runner != nil:

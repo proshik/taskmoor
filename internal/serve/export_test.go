@@ -47,3 +47,8 @@ func (s *Service) TelegramFailed(id string) bool {
 func (s *Service) AnswerIf(id string, n int, still func() bool) error {
 	return s.answerIf(id, Answer{Choices: [][]string{{fmt.Sprint(n)}}}, "person", "", still)
 }
+
+// SetApproving writes an Approve's intent, as Approve does before main moves.
+func (s *Service) SetApproving(id string, ap Approval) {
+	_, _ = s.changeIdea(id, func(i *Idea) error { i.Approving = &ap; return nil })
+}

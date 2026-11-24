@@ -368,3 +368,53 @@ func WaitReady(ctx context.Context, store string) (*Client, error) {
 		}
 	}
 }
+
+// AddIdea keeps a raw idea.
+func (c *Client) AddIdea(ctx context.Context, project, title, text string) (*Idea, error) {
+	var out Idea
+	err := c.do(ctx, http.MethodPost, "/api/ideas", map[string]string{"project": project, "title": title, "text": text}, &out)
+	return &out, err
+}
+
+// Ideas lists the ideas, newest first.
+func (c *Client) Ideas(ctx context.Context) ([]Idea, error) {
+	var out []Idea
+	err := c.do(ctx, http.MethodGet, "/api/ideas", nil, &out)
+	return out, err
+}
+
+// Idea is one idea.
+func (c *Client) Idea(ctx context.Context, id string) (*Idea, error) {
+	var out Idea
+	err := c.do(ctx, http.MethodGet, "/api/ideas/"+url.PathEscape(id), nil, &out)
+	return &out, err
+}
+
+// Grill starts an idea's grilling.
+func (c *Client) Grill(ctx context.Context, id string, req GrillRequest) (*Session, error) {
+	var out Session
+	err := c.do(ctx, http.MethodPost, "/api/ideas/"+url.PathEscape(id)+"/grill", req, &out)
+	return &out, err
+}
+
+// ReviewIdea is what Approve would merge.
+func (c *Client) ReviewIdea(ctx context.Context, id string) (*IdeaReview, error) {
+	var out IdeaReview
+	err := c.do(ctx, http.MethodGet, "/api/ideas/"+url.PathEscape(id)+"/review", nil, &out)
+	return &out, err
+}
+
+// Approve lands an idea's tasks at tip on main, as reviewed with main at
+// main.
+func (c *Client) Approve(ctx context.Context, id, tip, main string) (*ApproveResult, error) {
+	var out ApproveResult
+	err := c.do(ctx, http.MethodPost, "/api/ideas/"+url.PathEscape(id)+"/approve", map[string]string{"tip": tip, "main": main}, &out)
+	return &out, err
+}
+
+// DropIdea gives an idea up.
+func (c *Client) DropIdea(ctx context.Context, id string) (*Idea, error) {
+	var out Idea
+	err := c.do(ctx, http.MethodPost, "/api/ideas/"+url.PathEscape(id)+"/drop", map[string]any{}, &out)
+	return &out, err
+}

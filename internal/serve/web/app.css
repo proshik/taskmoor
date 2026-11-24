@@ -36,7 +36,7 @@ input.num { width: 4em; background: var(--bg); border: 1px solid var(--line); bo
 .conn.off { color: var(--bad); }
 .banner { padding: 6px 14px; background: var(--needs); border-bottom: 1px solid var(--line); }
 
-.board { display: grid; grid-template-columns: repeat(7, minmax(170px, 1fr)); gap: 10px; padding: 12px 14px; align-items: start; overflow-x: auto; }
+.board { display: grid; grid-template-columns: repeat(8, minmax(160px, 1fr)); gap: 10px; padding: 12px 14px; align-items: start; overflow-x: auto; }
 .col { min-width: 0; }
 .col h2 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); }
 .col h2 span { color: var(--ink); }
@@ -100,3 +100,6 @@ fieldset.plain { border: 0; padding: 0; margin: 0; }
 }
 
 .ask pre.preview { margin: 4px 0 6px 22px; padding: 6px 8px; max-height: 16em; overflow: auto; white-space: pre-wrap; font-size: 12px; border: 1px solid var(--line, #ccc); border-radius: 4px; }
+
+.add-idea { width: 100%; margin-bottom: 8px; }
+.card.idea .id { font-size: 11px; }

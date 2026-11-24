@@ -30,6 +30,9 @@ type App struct {
 	CheckOwner bool
 
 	loader project.Loader
+	// At reads the main source at this commit instead of the main
+	// branch's tip ("" for the tip).
+	At string
 }
 
 // Report is a derived view of the whole project: `list --json` and the
@@ -92,12 +95,12 @@ func (a *App) now() time.Time {
 
 // LoadSnapshot reads the project without deriving anything.
 func (a *App) LoadSnapshot(ctx context.Context) (*project.Snapshot, error) {
-	return a.loader.Load(ctx, a.Dir, a.Source)
+	return a.loader.LoadAt(ctx, a.Dir, a.Source, a.At)
 }
 
 // Load reads the project and derives statuses, without harness status.
 func (a *App) Load(ctx context.Context) (*project.Snapshot, map[string]*derive.Status, error) {
-	snap, err := a.loader.Load(ctx, a.Dir, a.Source)
+	snap, err := a.loader.LoadAt(ctx, a.Dir, a.Source, a.At)
 	if err != nil {
 		return nil, nil, err
 	}

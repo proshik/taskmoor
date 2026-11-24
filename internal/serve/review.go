@@ -57,6 +57,10 @@ func (s *Service) afterComplete(l *live) {
 	if l.app == nil {
 		return
 	}
+	if l.s.Idea != "" {
+		s.ideaSessionEnded(l) // tasks, not code: the person looks at them in Approve
+		return
+	}
 	rep, err := l.app.Report(context.Background())
 	if err != nil {
 		return

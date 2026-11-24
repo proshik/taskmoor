@@ -196,6 +196,75 @@ func (s *Service) Handler(token string, port int) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, res)
 	})
+	mux.HandleFunc("POST /api/ideas", func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Project, Title, Text string }
+		if err := decode(r, &body); err != nil {
+			writeErr(w, err)
+			return
+		}
+		i, err := s.AddIdea(body.Project, body.Title, body.Text)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, i)
+	})
+	mux.HandleFunc("GET /api/ideas", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.Ideas())
+	})
+	mux.HandleFunc("GET /api/ideas/{id}", func(w http.ResponseWriter, r *http.Request) {
+		i, err := s.IdeaByID(r.PathValue("id"))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, i)
+	})
+	mux.HandleFunc("POST /api/ideas/{id}/grill", func(w http.ResponseWriter, r *http.Request) {
+		var body GrillRequest
+		if err := decode(r, &body); err != nil {
+			writeErr(w, err)
+			return
+		}
+		sess, err := s.Grill(context.WithoutCancel(r.Context()), r.PathValue("id"), body)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, sess)
+	})
+	mux.HandleFunc("GET /api/ideas/{id}/review", func(w http.ResponseWriter, r *http.Request) {
+		rv, err := s.ReviewIdea(r.Context(), r.PathValue("id"))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, rv)
+	})
+	mux.HandleFunc("POST /api/ideas/{id}/approve", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Tip  string `json:"tip"`
+			Main string `json:"main"`
+		}
+		if err := decode(r, &body); err != nil {
+			writeErr(w, err)
+			return
+		}
+		res, err := s.Approve(context.WithoutCancel(r.Context()), r.PathValue("id"), body.Tip, body.Main)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	})
+	mux.HandleFunc("POST /api/ideas/{id}/drop", func(w http.ResponseWriter, r *http.Request) {
+		i, err := s.DropIdea(r.PathValue("id"))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, i)
+	})
 	mux.HandleFunc("GET /api/telegram", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.TelegramStatus())
 	})
