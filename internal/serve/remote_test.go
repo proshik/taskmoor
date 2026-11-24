@@ -377,6 +377,9 @@ func TestRemoteConfigChecked(t *testing.T) {
 
 // A revocation that cannot be written changes nothing and can be retried.
 func TestRemoteRevokeRetried(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory: the failed write cannot be made")
+	}
 	rg, rc, k := startRemote(t, "work")
 	pair(t, rg, rc, k)
 	ds, _ := rg.client.Devices(context.Background())

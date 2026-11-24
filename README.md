@@ -1,33 +1,116 @@
 # taskmoor
 
-A CLI with a TUI board for the tasks a repository keeps as files:
-`tasks/<ID>-<slug>.md` (YAML front matter + Markdown body) and
-`tasks/tasks.toml`. A person runs `taskmoor` in the project's terminal and
-watches every task's lifecycle and the harness status of the running ones;
-agents and launchers change the shared state through the CLI.
+[![CI](https://github.com/proshik/taskmoor/actions/workflows/ci.yml/badge.svg)](https://github.com/proshik/taskmoor/actions/workflows/ci.yml)
 
-taskmoor is also the home of the format: [`spec/README.md`](spec/README.md),
-`task.schema.json` and `state.schema.json`, `format = 1`. The schemas are
-embedded in the binary.
+Tasks that live in the repository, and a conveyor that runs coding agents
+on them.
 
-## Install and build
+- **The format.** Each task is a file, `tasks/<ID>-<slug>.md` (YAML front
+  matter + Markdown body), with `tasks/tasks.toml` for the project. The
+  lifecycle (backlog, in progress, review, merged, done) is derived from
+  git and a small shared state file, so every worktree sees the same board.
+  The format is specified in [`spec/README.md`](spec/README.md) with JSON
+  schemas (`format = 1`), embedded in the binary.
+- **The CLI and the TUI board.** `taskmoor list | show | ready | validate
+  | claim | review | release` and a terminal board, for people and for
+  agents (see [`skills/taskmoor/SKILL.md`](skills/taskmoor/SKILL.md)).
+- **The service.** `taskmoor serve` runs agent sessions on ready tasks —
+  Claude Code, Codex and OpenCode, on your own sign-ins and subscriptions —
+  each in its own worktree and branch (Claude's and Codex's in their
+  sandboxes). Their questions and
+  approvals come to a web board (and Telegram, and the phone), a
+  dispatcher answers what the project's documents already answer, the
+  finished branch goes through code review, and you accept it into main.
+  Push stays yours.
 
-Needs Go 1.26, git 2.45 or newer on `PATH` (taskmoor checks it: older git
-fetches missing objects of a partial clone despite `GIT_NO_LAZY_FETCH`, and
-lacks `worktree list -z` before 2.36) and
-[`just`](https://github.com/casey/just) for the recipes.
+The design and its history are in [`docs/plan.md`](docs/plan.md) (the
+format and the CLI) and [`docs/conveyor.md`](docs/conveyor.md) (the
+service, stage by stage).
+
+## Install
+
+Needs git 2.45 or newer on `PATH` (taskmoor checks it: older git fetches
+missing objects of a partial clone despite `GIT_NO_LAZY_FETCH`, and lacks
+`worktree list -z` before 2.36). macOS and Linux; the service is built and
+checked on macOS (idle-sleep assertion, the plan usage readers, launchd).
+
+From a release (macOS and Linux, arm64 and amd64):
+
+```sh
+v=v0.1.0 os=darwin arch=arm64            # your version and system (linux, amd64)
+curl -fsSLO https://github.com/proshik/taskmoor/releases/download/$v/taskmoor_${v}_${os}_${arch}.tar.gz
+curl -fsSLO https://github.com/proshik/taskmoor/releases/download/$v/checksums.txt
+grep "taskmoor_${v}_${os}_${arch}.tar.gz" checksums.txt | shasum -a 256 -c
+tar -xzf taskmoor_${v}_${os}_${arch}.tar.gz
+install taskmoor_${v}_${os}_${arch}/taskmoor ~/.local/bin/   # or anywhere on PATH
+taskmoor version
+```
+
+The binaries are not signed: an archive downloaded with a browser on macOS
+needs `xattr -d com.apple.quarantine taskmoor` once (curl does not mark it).
+
+With Go 1.26:
+
+```sh
+go install github.com/proshik/taskmoor/cmd/taskmoor@latest
+```
+
+From a checkout ([`just`](https://github.com/casey/just) for the recipes):
 
 ```sh
 just build          # bin/taskmoor
 just check          # gofmt, go vet, golangci-lint (when installed), go test
 ```
 
-Run the built binary by its path, or put it on `PATH`:
+## Quick start
+
+In a repository with `tasks/` (the format's example config is
+[`spec/tasks.example.toml`](spec/tasks.example.toml)):
 
 ```sh
-/path/to/taskmoor/bin/taskmoor --repo ~/work/some-project list
-go install ./cmd/taskmoor    # into $(go env GOPATH)/bin
+taskmoor validate                       # the tasks check out
+taskmoor                                # the TUI board
 ```
+
+To run agents, write `~/.config/taskmoor/config.toml` (profiles name the
+agent and model; the service's fields are described below):
+
+```toml
+default_profile = "claude"
+dispatcher_profile = "dispatcher"   # optional: answers questions the docs answer
+
+[[profiles]]
+name = "claude"
+harness = "claude"
+description = "careful changes across the code, with tests"
+
+[[profiles]]
+name = "claude-haiku"
+harness = "claude"
+model = "haiku"
+description = "typos, docs edits, small well-specified changes"
+
+[[profiles]]
+name = "dispatcher"
+harness = "claude"
+model = "sonnet"
+```
+
+then:
+
+```sh
+taskmoor serve                          # in its own terminal tab; prints the board's sign-in link
+taskmoor project add ~/work/some-project
+```
+
+and press **Run** on a ready task in the board (or `taskmoor run ID`).
+
+**What runs where.** The service and the agents run on your Mac, under
+your sign-ins: nothing of taskmoor runs anywhere else. Reaching the board
+from a phone outside home is optional: a VPS of yours runs stock images
+(Caddy, Pocket ID, oauth2-proxy, from the `docker-compose.yml` that
+`taskmoor remote files` writes) and the Mac keeps a reverse ssh tunnel to
+it. There is no taskmoor image to deploy.
 
 ## Use
 
@@ -81,12 +164,12 @@ Readers never write: git runs with `GIT_NO_LAZY_FETCH=1` and
 `GIT_OPTIONAL_LOCKS=0`, task files over 1 MiB (64 MiB together) and state
 files over 64 KiB are refused, and only regular files are read.
 
-## The service (conveyor v1, stages 1–3)
+## The service
 
 `taskmoor serve` runs agent sessions on ready tasks: Claude (`claude -p`
 stream-json on the person's subscription), Codex and OpenCode (over ACP),
-driven from the CLI, the web board and the TUI. The dispatcher, review and
-Telegram are the later stages in [`docs/conveyor.md`](docs/conveyor.md).
+driven from the CLI, the web board and the TUI. The stages that added
+each part are in [`docs/conveyor.md`](docs/conveyor.md).
 
 Needs the agent of each profile on the service's `PATH`: [Claude
 Code](https://code.claude.com) signed in with the subscription (`claude`,
@@ -436,3 +519,18 @@ internal/testrepo    real git repositories for tests
 skills/taskmoor/     how an agent uses taskmoor
 docs/                the plan and the conveyor design
 ```
+
+## Development
+
+`just check` runs what CI runs on every push and pull request (gofmt,
+`go vet`, `go test -race` on Linux and macOS). The tests drive real git
+repositories and fake agents; no test reaches a real agent or the network.
+How to work in this repository: [`AGENTS.md`](AGENTS.md).
+
+A release is a tag: pushing `vX.Y.Z` builds the binaries for macOS and
+Linux (arm64, amd64) with the version set, and publishes them with their
+checksums as a GitHub release.
+
+## License
+
+[MIT](LICENSE)

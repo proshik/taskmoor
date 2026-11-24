@@ -26,3 +26,7 @@ build:
 
 fmt:
     gofmt -w .
+
+# the release archives in dist/, as the release workflow builds them
+dist version:
+    scripts/dist.sh {{version}}
