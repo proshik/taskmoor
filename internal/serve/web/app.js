@@ -727,9 +727,12 @@ function card(project, t, sess, col) {
     meta.push(h("span", { class: "st-" + sess.state }, "● " + stateWord(sess.state)));
     if (sess.billing) meta.push(billingChip(sess.billing));
     if (!sess.confined) meta.push(isolationChip(sess.isolation));
-    if (sess.review) meta.push(h("span", { class: "chip", title: "code review (revust)" }, "review " + sess.review.done + "/" + sess.review.rounds + " " + sess.review.state));
+    if (sess.review) meta.push(h("span", { class: "chip", title: "code review (revust)" }, "review " + sess.review.done + "/" + sess.review.rounds + " " + reviewState(sess.review, sess)));
   } else if (t.harness) {
     meta.push(h("span", { class: "st-" + t.harness.status }, "● " + t.harness.status));
+  }
+  if (sess && sess.review && ENDED.has(sess.state) && !(col === "running" || col === "needs" || col === "review") && reviewState(sess.review, sess) === "postponed, not run") {
+    meta.push(h("span", { class: "chip", title: "its code review never ran" }, "review not run"));
   }
   if (t.state && t.state.stale) meta.push(h("span", { class: "chip" }, "stale"));
   if (t.release_tag) meta.push(h("span", { class: "chip" }, t.release_tag));
@@ -742,6 +745,14 @@ function card(project, t, sess, col) {
   h("div", { class: "row" }, h("span", { class: "id" }, t.id), h("span", { class: "chip" }, "P" + t.priority)),
   h("div", { class: "title" }, t.title),
   h("div", { class: "meta" }, meta));
+}
+
+// reviewState: a round the plan's guard held back is postponed (it starts
+// on its own once the plan has room), not failed.
+function reviewState(rv, sess) {
+  // only a completed session's round starts again on its own (stage 6)
+  if (rv.state === "error" && /^postponed:/.test(rv.error || "")) return sess && sess.state === "complete" ? "postponed" : "postponed, not run";
+  return rv.state;
 }
 
 function stateWord(s) {
@@ -966,11 +977,14 @@ function sessionView(sess) {
 // acceptanceView is the review and Accept (A5, A8): loaded on request,
 // the diff can be large.
 function acceptanceView(sess) {
-  if (sess.state === "accepted") return h("p", {}, "Accepted: merged as " + (sess.merged || "").slice(0, 12) + ". Push is yours.");
+  if (sess.state === "accepted") {
+    const rvLine = sess.review ? " Review: " + sess.review.done + " of " + sess.review.rounds + " round(s), " + reviewState(sess.review, sess) + "." : "";
+    return h("p", {}, "Accepted: merged as " + (sess.merged || "").slice(0, 12) + "." + rvLine + " Push is yours.");
+  }
   const rv = sess.review;
   const box = h("div", { class: "acceptance" });
   const head = [h("h3", {}, "Acceptance")];
-  if (rv) head.push(h("p", {}, "Review: " + rv.done + " of " + rv.rounds + " round(s), " + rv.state + (rv.partial ? " (partial: " + rv.partial + ")" : "") +
+  if (rv) head.push(h("p", {}, "Review: " + rv.done + " of " + rv.rounds + " round(s), " + reviewState(rv) + (rv.partial ? " (partial: " + rv.partial + ")" : "") +
     (rv.findings ? " (" + rv.findings + " finding(s))" : "") + (rv.unreviewed ? "; the last fixes are not reviewed again" : "") + (rv.error ? " — " + rv.error : "")));
   const err = h("div", { class: "err" });
   const load = async () => {

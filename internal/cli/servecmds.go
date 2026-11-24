@@ -712,7 +712,15 @@ func (r runner) acceptanceCmd(ctx context.Context, args []string) int {
 		fmt.Fprintf(w, "\nuncommitted in the worktree (not merged):\n%s\n", text.Block(a.Dirty))
 	}
 	if rv := a.Review; rv != nil {
-		fmt.Fprintf(w, "\nreview: %d of %d round(s), %s", rv.Done, rv.Rounds, rv.State)
+		state := rv.State
+		if state == "error" && strings.HasPrefix(rv.Error, "postponed:") {
+			// only a completed session's round starts again on its own
+			state = "postponed, not run"
+			if a.Session.State == serve.StateComplete {
+				state = "postponed (it starts once the plan has room)"
+			}
+		}
+		fmt.Fprintf(w, "\nreview: %d of %d round(s), %s", rv.Done, rv.Rounds, state)
 		if rv.Partial != "" {
 			fmt.Fprintf(w, " (partial: %s)", rv.Partial)
 		}

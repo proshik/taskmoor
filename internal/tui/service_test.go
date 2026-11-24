@@ -40,6 +40,12 @@ func TestServiceBoardShowsConveyorColumns(t *testing.T) {
 		Sessions: []serve.Session{
 			{ID: "s3", Project: "repo", Task: "TM-003", State: serve.StateActive, StartedAt: "2026-11-22T10:00:00Z"},
 			{ID: "s4", Project: "repo", Task: "TM-004", State: serve.StateAwaitingInput, StartedAt: "2026-11-22T10:00:00Z"},
+		},
+		Ideas: []serve.Idea{
+			{ID: "idea-1a2b3c4d", Project: "repo", Title: "Faster board", Text: "it is slow", State: serve.IdeaGrilling},
+			{ID: "idea-99999999", Project: "repo", Title: "Old", State: serve.IdeaApproved}, // done: not shown
+			{ID: "idea-88888888", Project: "other", Title: "Elsewhere", State: serve.IdeaNew},
+			{ID: "idea-77777777", Project: "repo", ProjectPath: "/an/earlier/checkout", Title: "Before", State: serve.IdeaNew},
 		}}}
 	sl := &ServiceLoader{Client: fs, Project: "repo", Local: local}
 	rep, err := sl.Report(context.Background())
@@ -51,6 +57,9 @@ func TestServiceBoardShowsConveyorColumns(t *testing.T) {
 	m = send(t, m, tea.WindowSizeMsg{Width: 200, Height: 40})
 	v := view(m)
 	must(t, v, "Backlog 1", "Ready 1", "Running 1", "Needs you 1", "Review 0", "TM-001", "TM-004", "serve ●")
+	must(t, v, "Ideas 1", "idea-1a2b3c4d", "Faster board")
+	must(t, v, "4 tasks") // the idea is not one of them
+	mustNot(t, v, "idea-99999999", "idea-88888888", "idea-77777777")
 
 	// a change at the service moves the fingerprint
 	fp1, _ := sl.Fingerprint(context.Background(), rep)
@@ -112,8 +121,8 @@ func TestServiceGoingAwayKeepsAValidColumn(t *testing.T) {
 	m := New(context.Background(), sl, crep)
 	m.glamStyle = "notty"
 	m = send(t, m, tea.WindowSizeMsg{Width: 100, Height: 30}) // narrow: tabs
-	for i := 0; i < 6; i++ {
-		m = keys(t, m, "<right>") // the empty Done column, index 6
+	for i := 0; i < 7; i++ {
+		m = keys(t, m, "<right>") // the empty Done column, index 7 (after Ideas)
 	}
 	if m.currentColumn() != "done" {
 		t.Fatalf("column %s", m.currentColumn())

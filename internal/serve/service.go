@@ -568,7 +568,11 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*Session, error) {
 		}
 	}
 	s.publishSession(l)
-	if err := s.launch(l, false, assignment(t, rep.Snapshot, wt, branch), plan); err != nil {
+	first := assignment(t, rep.Snapshot, wt, branch)
+	if plan != nil {
+		first += sandboxNote
+	}
+	if err := s.launch(l, false, first, plan); err != nil {
 		return s.snapshotSession(id), err
 	}
 	return s.snapshotSession(id), nil

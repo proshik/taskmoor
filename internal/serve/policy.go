@@ -188,11 +188,283 @@ func (r Rules) write(p string) Verdict {
 
 func (r Rules) command(cmd string) Verdict {
 	c := strings.TrimSpace(cmd)
-	for _, d := range r.Protected {
+	for _, d := range r.Protected { // anywhere in the text: conservative
 		if d != "" && strings.Contains(strings.ToLower(c), strings.ToLower(filepath.Clean(d))) {
 			return Verdict{Deny, protectedReason}
 		}
 	}
+	// two readings, the stricter wins: the simple commands that run
+	// (shellparse.go), and the raw text with its data — literal heredocs,
+	// quoted text — taken out, so what the reading misses is still judged
+	// as before stage 11
+	raw := r.commandRaw(commentsStripped(dataStripped(c)))
+	stmts, err := parseShell(c)
+	if err != nil {
+		return stricter(raw, r.commandRaw(c)) // unreadable: the whole text, as before
+	}
+	return stricter(raw, r.commands(stmts))
+}
+
+// stricter is the more restrictive verdict: Deny, then AskPerson.
+func stricter(a, b Verdict) Verdict {
+	rank := func(v Verdict) int {
+		switch v.Decision {
+		case Deny:
+			return 2
+		case AskPerson:
+			return 1
+		}
+		return 0
+	}
+	if rank(b) > rank(a) {
+		return b
+	}
+	return a
+}
+
+// commentsStripped drops the shell's comments (a "#" that starts a word,
+// outside quotes, to the end of its line); quoted text stays as it is.
+func commentsStripped(c string) string {
+	src := []rune(c)
+	var b strings.Builder
+	for i := 0; i < len(src); i++ {
+		r := src[i]
+		switch r {
+		case '\\':
+			b.WriteRune(r)
+			if i+1 < len(src) {
+				i++
+				b.WriteRune(src[i])
+			}
+		case '\'', '"':
+			end := i + 1
+			for end < len(src) && src[end] != r {
+				if r == '"' && src[end] == '\\' {
+					end++
+				}
+				end++
+			}
+			if end >= len(src) {
+				return c // unbalanced: the text as it is
+			}
+			b.WriteString(string(src[i : end+1]))
+			i = end
+		case '#':
+			if i == 0 || src[i-1] == ' ' || src[i-1] == '\t' || src[i-1] == '\n' || src[i-1] == ';' {
+				for i < len(src) && src[i] != '\n' {
+					i++
+				}
+				b.WriteRune('\n')
+				continue
+			}
+			b.WriteRune(r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// gitSub is git's subcommand and its arguments, after git's own options.
+func gitSub(args []string) (string, []string) {
+	withArg := map[string]bool{"-C": true, "-c": true, "--git-dir": true, "--work-tree": true, "--namespace": true, "--config-env": true, "--super-prefix": true, "--exec-path": false}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case withArg[a]:
+			i++
+		case strings.HasPrefix(a, "-"):
+		default:
+			return a, args[i+1:]
+		}
+	}
+	return "", nil
+}
+
+// commands judges the simple commands a command runs (shellparse.go):
+// what is data — a heredoc written by cat, a quoted message — is not.
+func (r Rules) commands(stmts []shellStmt) Verdict {
+	var all []string // every word that runs, for the checks across commands
+	outsideCwd := false
+	for _, st := range stmts {
+		if st.cmd() == "git" {
+			sub, rest := gitSub(st.args())
+			switch sub {
+			case "push", "send-email":
+				return Verdict{Deny, "push, publish and deploy stay the person's: an agent session never runs them"}
+			case "checkout", "switch":
+				for _, a := range rest {
+					if strings.HasPrefix(a, "-") {
+						continue
+					}
+					if r.MainBranch != "" && a == r.MainBranch {
+						return Verdict{Deny, "the task's work stays on its branch; merges into " + r.MainBranch + " happen only through Accept"}
+					}
+					break
+				}
+			}
+		} else {
+			t := st.text()
+			for _, re := range denyCommands {
+				if loc := re.FindStringIndex(t); loc != nil && loc[0] == 0 {
+					return Verdict{Deny, "push, publish and deploy stay the person's: an agent session never runs them"}
+				}
+			}
+		}
+		all = append(all, st.words...)
+		all = append(all, st.writes...)
+		all = append(all, st.reads...)
+	}
+	text := strings.Join(all, " ")
+	if r.MainCheckout != "" && strings.Contains(text, r.MainCheckout) && !strings.Contains(text, r.Worktree) {
+		if gitWrite.MatchString(text) {
+			return Verdict{Deny, "the main checkout is the person's: merges into " + r.MainBranch + " happen only through Accept"}
+		}
+		return Verdict{AskPerson, "names the main checkout " + r.MainCheckout}
+	}
+	cwdOut := map[int]bool{} // per subshell depth: a ( ) does not move its parent
+	last := 0
+	for _, st := range stmts {
+		if st.depth < last {
+			for d := range cwdOut {
+				if d > st.depth {
+					delete(cwdOut, d)
+				}
+			}
+		} else if st.depth > last {
+			for d := last + 1; d <= st.depth; d++ {
+				cwdOut[d] = cwdOut[d-1]
+			}
+		}
+		last = st.depth
+		outsideCwd = cwdOut[st.depth]
+		switch st.cmd() {
+		case "cd", "pushd", "popd":
+			// a relative path is relative to where it goes: outside, or not
+			// known, every later relative write or delete counts as outside
+			dir := ""
+			for _, a := range st.args() {
+				if !strings.HasPrefix(a, "-") {
+					dir = a
+					break
+				}
+			}
+			switch {
+			case dir == "" || st.cmd() == "popd" || strings.HasPrefix(dir, "~") || strings.HasPrefix(dir, "$"):
+				outsideCwd = true
+			case strings.HasPrefix(dir, "/"):
+				outsideCwd = !r.inside(dir)
+			case strings.HasPrefix(dir, "..") || strings.Contains(dir, "/../"):
+				outsideCwd = true
+			}
+			cwdOut[st.depth] = outsideCwd
+		}
+		ts := append(append([]string{}, st.writes...), writeArgs(st)...)
+		if outsideCwd {
+			for _, t := range ts {
+				if t != "" && !strings.HasPrefix(t, "/") && !strings.HasPrefix(t, "-") && t != "$CMD" {
+					return Verdict{AskPerson, "writes outside the task's worktree (after a cd): " + t}
+				}
+			}
+		}
+		if v, ok := r.targets(ts); ok {
+			return v
+		}
+		switch st.cmd() {
+		case "rm", "rmdir", "unlink", "shred", "trash":
+			for _, f := range st.args() {
+				if strings.HasPrefix(f, "-") {
+					continue
+				}
+				if outsideCwd || strings.HasPrefix(f, "~") || strings.HasPrefix(f, "..") || strings.Contains(f, "/../") || strings.HasPrefix(f, "/") && !r.inside(f) {
+					return Verdict{AskPerson, fmt.Sprintf("deletes outside the task's worktree (%s)", f)}
+				}
+			}
+		}
+	}
+	for _, w := range all {
+		// a path in an option's value too (--env-file=.env)
+		for _, v := range append([]string{w}, strings.Split(w, "=")...) {
+			v = strings.Trim(v, `"'`)
+			if secretPath.MatchString(v) || strings.Contains(v, ".ssh/") || strings.HasPrefix(filepath.Base(v), ".env") {
+				return Verdict{AskPerson, "touches a file that may hold a secret"}
+			}
+		}
+	}
+	return Verdict{Allow, ""}
+}
+
+// writeArgs are the paths a command writes by its arguments.
+func writeArgs(st shellStmt) []string {
+	var plain []string
+	target := ""
+	args := st.args()
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-t" && i+1 < len(args):
+			target = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--target-directory="):
+			target = strings.TrimPrefix(a, "--target-directory=")
+		case strings.HasPrefix(a, "-"):
+		default:
+			plain = append(plain, a)
+		}
+	}
+	switch st.cmd() {
+	case "mv": // a move also takes its sources away
+		if target != "" {
+			return append(plain, target)
+		}
+		return plain
+	case "cp", "install", "rsync", "ln":
+		if target != "" {
+			return []string{target}
+		}
+		if len(plain) > 0 {
+			return plain[len(plain)-1:] // the destination; the sources are read
+		}
+	case "tee", "mkdir", "touch", "truncate":
+		return plain
+	case "chmod", "chown", "chgrp":
+		if len(plain) > 1 {
+			return plain[1:] // after the mode or owner
+		}
+	case "dd":
+		for _, a := range args {
+			if p, ok := strings.CutPrefix(a, "of="); ok {
+				return []string{p}
+			}
+		}
+	}
+	return nil
+}
+
+// targets applies the file-tool rules to paths a command writes.
+func (r Rules) targets(ts []string) (Verdict, bool) {
+	for _, t := range ts {
+		if t == "" || strings.HasPrefix(t, "-") || t == "$CMD" {
+			continue
+		}
+		outside := strings.HasPrefix(t, "~") || strings.HasPrefix(t, "..") || strings.Contains(t, "/../") ||
+			strings.HasPrefix(t, "/") && !r.inside(t)
+		switch {
+		case outside && strings.HasPrefix(t, "/") && harmlessPath(t):
+		case outside:
+			return Verdict{AskPerson, "writes outside the task's worktree: " + t}, true
+		case manifest.MatchString(filepath.ToSlash(t)):
+			return Verdict{AskPerson, "changes a dependency manifest: " + filepath.Base(t)}, true
+		case secretPath.MatchString(filepath.ToSlash(r.abs(t))):
+			return Verdict{AskPerson, "writes a file that may hold a secret: " + t}, true
+		}
+	}
+	return Verdict{}, false
+}
+
+// commandRaw judges a command the shell reading could not follow, on its
+// text (the rules before stage 11).
+func (r Rules) commandRaw(c string) Verdict {
 	for _, re := range denyCommands {
 		if re.MatchString(c) {
 			return Verdict{Deny, "push, publish and deploy stay the person's: an agent session never runs them"}

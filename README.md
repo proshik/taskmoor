@@ -220,7 +220,7 @@ model = "provider/model"
   0` skips review. `taskmoor acceptance ID [--diff]` (or the card's
   Acceptance) shows the commits, the diff against the merge base, what is
   uncommitted in the worktree, the task's Checks, the agent's summary and
-  the review; `taskmoor accept ID` (Accept) merges:
+  the review; `taskmoor accept ID --tip C` (Accept; C from the acceptance view) merges:
   - a trial merge first (`git merge-tree`, which writes no worktree): a
     conflict sends the task back to its session to merge main into its
     branch;

@@ -47,6 +47,7 @@ var columnNames = map[string]string{
 	colReady:          "Ready",
 	colRunning:        "Running",
 	colNeeds:          "Needs you",
+	colIdeas:          "Ideas",
 }
 
 // The conveyor's own columns (A21), when the board reads taskmoor serve.
@@ -54,6 +55,7 @@ const (
 	colReady   = "ready"
 	colRunning = "running"
 	colNeeds   = "needs"
+	colIdeas   = "ideas" // the service's ideas (stage 8), read-only here
 )
 
 // Messages.
@@ -378,7 +380,7 @@ func (m Model) boardKey(k string) (tea.Model, tea.Cmd) {
 func (m Model) columns() []string {
 	cols := []string{derive.Backlog, derive.InProgress, derive.Review, derive.Merged, derive.Done}
 	if m.rep != nil && m.rep.Conveyor {
-		cols = []string{derive.Backlog, colReady, colRunning, colNeeds, derive.Review, derive.Merged, derive.Done}
+		cols = []string{colIdeas, derive.Backlog, colReady, colRunning, colNeeds, derive.Review, derive.Merged, derive.Done}
 	}
 	if m.showCancelled {
 		cols = append(cols, derive.Cancelled)
@@ -563,7 +565,13 @@ func (m Model) title() string {
 	if len(head) > 7 {
 		head = head[:7]
 	}
-	parts := []string{bold.Render("taskmoor"), r.Project, r.MainBranch + " " + head, fmt.Sprintf("%d tasks", len(r.Tasks))}
+	n := 0
+	for _, t := range r.Tasks {
+		if t.Column != colIdeas { // ideas have a column, not a count among tasks
+			n++
+		}
+	}
+	parts := []string{bold.Render("taskmoor"), r.Project, r.MainBranch + " " + head, fmt.Sprintf("%d tasks", n)}
 	switch r.HarnessSource {
 	case harness.ReportGuild:
 		parts = append(parts, "Guild "+lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("●"))
@@ -757,6 +765,9 @@ func card(t app.TaskView, w int, focused, selected bool) []string {
 		tl, tr, bl, br = "╭", "╮", "╰", "╯"
 	}
 	marks := fmt.Sprintf("P%d", t.Priority)
+	if t.Column == colIdeas {
+		marks = t.Lifecycle // the idea's state
+	}
 	if t.Lifecycle == derive.Backlog {
 		if t.Ready {
 			marks += " ✓"
@@ -893,6 +904,13 @@ func (m Model) facts(t app.TaskView) string {
 	var b strings.Builder
 	line := func(label, value string) {
 		fmt.Fprintf(&b, "%s %s\n", dim.Render(fmt.Sprintf("%-13s", label)), value)
+	}
+	if t.Column == colIdeas {
+		line("idea", t.Lifecycle+" — grill, review and approve it on the board or with taskmoor idea")
+		if len(t.Touches) > 0 {
+			line("tasks", text.Line(strings.Join(t.Touches, ", ")))
+		}
+		return b.String()
 	}
 	if len(t.DependsOn) > 0 {
 		var ds []string

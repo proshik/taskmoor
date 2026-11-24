@@ -138,6 +138,21 @@ func (l *ServiceLoader) Report(ctx context.Context) (*app.Report, error) {
 		t.Column = conveyorColumn(t, latest[t.ID])
 		rep.Tasks = append(rep.Tasks, t)
 	}
+	// the ideas under way (stage 8): shown, their work is the board's
+	for _, i := range snap.Ideas {
+		if i.Project != l.Project || (i.State != serve.IdeaNew && i.State != serve.IdeaGrilling && i.State != serve.IdeaProposed) {
+			continue
+		}
+		if i.ProjectPath != "" && i.ProjectPath != ps.Path {
+			continue // an idea of an earlier checkout of the same name
+		}
+		body := i.Text
+		if i.Branch != "" {
+			body += "\n\n---\nbranch " + i.Branch + ", worktree " + i.Worktree
+		}
+		rep.Tasks = append(rep.Tasks, app.TaskView{ID: i.ID, Title: i.Title, Lifecycle: i.State, Column: colIdeas,
+			Reasons: []string{}, Touches: i.Tasks, Task: &project.Task{ID: i.ID, Title: i.Title, Body: body}})
+	}
 	if rep.Tasks == nil {
 		rep.Tasks = []app.TaskView{}
 	}

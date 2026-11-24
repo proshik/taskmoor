@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-23; stages 1–7 of v1 are implemented, and stages 8 and 9 of v2 (ideas and intake; the web from outside), and stage 10 (the phone app, first of Later).**
+2026-11-23; stages 1–7 of v1 are implemented, and stages 8 and 9 of v2 (ideas and intake; the web from outside), and stages 10–11 (the phone app, first of Later; a run on real tasks and its fixes).**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -1733,6 +1733,84 @@ The smallest loop that runs a real agent on a real task.
    cached (the rest best effort); number and password fields get the
    phone sizes too.
 
+### Stage 11 — a run on real tasks, and what it showed
+
+- The person's choice (2026-11-24): hardening instead of a new Later item.
+
+#### Stage 11 — what was done (2026-11-24)
+
+1. **The run.** The demo project of stage 8's checks (a notes CLI in
+   POSIX sh) went through the conveyor end to end with real agents: the
+   eight tasks two grilled ideas produced (DM-001…DM-008) — DM-001 on
+   Codex, the rest on Claude in the sandbox, DM-005 and DM-006 side by
+   side under "keep 2 busy", each next one started by the service as
+   Accept made it ready — and every one accepted into main with its
+   `Task:` trailer. No question or approval came up; main's 249 checks
+   (the agents' own test scripts) pass and the CLI works. DM-002's
+   review round was postponed by the usage guard (Codex at 8 %), as it
+   should be; it was accepted unreviewed, which the acceptance view
+   showed.
+2. **Heredoc data is data** (`shellparse.go`); nothing else is judged
+   more loosely. Stage 8's grilling asked for approvals that were not
+   needed: the rule for writes read the whole command text, so a heredoc
+   writing a task file ("Do not touch README.md", "/" in prose) counted as
+   writes outside the worktree. Every command is now judged twice and the
+   stricter verdict wins: (b) the raw rules of before, on the text with
+   only two things taken out — the body of a heredoc read by `cat` or
+   `tee`, piped nowhere, that runs nothing (a quoted delimiter, or no
+   `$(`/backquote in it), and comments; and (a) a reading of the simple
+   commands that run, which can only add strictness: `$(...)`,
+   backquotes, `<(...)`, a heredoc's substitutions (unquoted delimiter),
+   `sh -c` (options as the shell reads them: `-xc`, `--norc -c`, `-s`
+   with arguments), `eval`, heredocs and here-strings a shell reads,
+   commands after `if`/`while`/`!`; git's subcommand after its options
+   (`/usr/bin/git push`); a `cd` away from the worktree making later
+   relative writes and deletes count as outside, scoped to its subshell
+   and placed where nested commands run; `mv`'s sources; an option's
+   value (`--env-file=.env`). Quoted text in a command (a commit message,
+   an `echo`, a variable's value) is judged as before stage 11, so its
+   false positives remain (`git commit -m 'never git push'` is still
+   refused); a command the reading cannot follow is judged on its whole
+   text.
+3. **`packed-refs.lock`.** Git 2.50 tries it on every commit; the sandbox
+   denies it (a lock left there would block the person's git), so git
+   prints an error and the commit lands anyway. A confined agent's first
+   message now says so, so it does not try to work around it.
+4. **A postponed review** shows as "postponed" (board and CLI), not
+   "error": it starts on its own once the plan has room (stage 6).
+5. **The TUI** shows the ideas under way (new, grilling, proposed) in an
+   Ideas column, read-only: their work is the board's and `taskmoor idea`.
+6. `taskmoor accept`'s usage line names `--tip` (needed since stage 5).
+7. Seen, not changed: accepted tasks' worktrees stay (A7), eight after
+   this run; grilled tasks copy the repository's `reviews` setting (here
+   `code: 0`).
+8. **Review r1** (15 findings, all fixed): the readings above (a) and
+   (b) answer its bypasses — an absolute git path, substitutions in an
+   unquoted heredoc, `bash --norc -c`, a here-string to a shell, a `cd`
+   before a relative `rm`, `mv`'s sources, `--env-file=.env` — and its
+   false positives (a heredoc next to an unrelated shell check, a commit
+   message); the packed-refs lock stays denied (it could have blocked the
+   person's git); the TUI counts tasks without ideas and shows only the
+   ideas of the checkout it reads; an accepted task's postponed review
+   reads "postponed, not run"; the README's first Accept command names
+   `--tip`.
+9. **Review r2** (18 findings, all addressed; the last round): its
+   bypasses of the reading (a shell inside `if`, `bash -s` with
+   arguments, a shell-fed heredoc's substitutions, a nested `cd`, a quoted
+   `go.mod` copied into a directory) came from taking quoted text out of
+   the raw rules' input; that was given up — the raw rules see quoted
+   text again, and only cat/tee heredoc data and comments are taken out
+   (point 2), from their recorded ranges in one pass. The reading also
+   learned what those findings showed (keywords, `-s`, producer-side
+   substitutions, nested commands in place and in their own scope,
+   heredocs on other descriptors, subshell scopes) and analyses pipelines
+   only from statements with input. A postponed review promises a retry
+   only for a completed session, and the board shows "review not run" on
+   an accepted task. Not changed, and conservative: quoted text's false
+   positives (a commit message naming `.env`, the main checkout or a
+   push); git's packed-refs diagnostic in the sandbox (the commit itself
+   takes the lock; the agent is told).
+
 ### What each stage needs from the person
 
 | Stage | Decision or permission |
@@ -1747,6 +1825,7 @@ The smallest loop that runs a real agent on a real task.
 | 8 | Nothing new; a real grilling runs on the subscription. |
 | 9 | The outer sign-in, the WebAuthn library, who deploys; at the end the VPS, its domains and the deployment, which the person does. |
 | 10 | Push in or out, own code or a library; the real check on the phone after stage 9's deployment. |
+| 11 | Nothing new: a run on the demo project with real agents on the subscriptions. |
 
 ## Relation to Guild
 

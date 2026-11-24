@@ -70,6 +70,83 @@ func TestRules(t *testing.T) {
 	}
 }
 
+// Stage 11: data is not commands; what runs inside is.
+func TestRulesReadTheShell(t *testing.T) {
+	r := Rules{Worktree: "/w/repo-tm-001", MainBranch: "main", MainCheckout: "/w/repo"}
+	stage8 := "cd /w/repo-tm-001\nCTX='## Context\n\n- Do not touch README.md; output is `N YYYY-MM-DD TEXT`, a/b and / alone.'\n\n" +
+		"cat > tasks/DM-006-number-notes.md <<EOF\n---\nid: DM-006\n---\n\n## Limits\n\nDo not touch README.md (DM-008). Never git push.\n\n$CTX\nEOF\n" +
+		"cat >> tasks/tasks.toml <<'EOF'\n\n[components.cli]\npaths = [\"notes\", \"tests/**\"]\nEOF\n" +
+		"../taskmoor --repo \"$PWD\" --source worktree validate; echo exit=$?"
+	// the same files written without the quoted CTX assignment (its words —
+	// "touch", "/" — are judged as before stage 11)
+	stage8Plain := "cd /w/repo-tm-001\n" +
+		"cat > tasks/DM-006-number-notes.md <<EOF\n---\nid: DM-006\n---\n\n## Limits\n\nDo not touch README.md (DM-008). Never git push. a/b and / alone.\n\n$NOTE\nEOF\n" +
+		"cat >> tasks/tasks.toml <<'EOF'\n\n[components.cli]\npaths = [\"notes\", \"tests/**\"]\nEOF\n" +
+		"../taskmoor --repo \"$PWD\" --source worktree validate; echo exit=$?"
+	cases := []struct {
+		cmd  string
+		want Decision
+	}{
+		{stage8Plain, Allow},
+		{stage8, AskPerson}, // the assignment's words, as before
+		{"cat > notes.md <<'EOF'\nnever git push, and rm -rf / is right out\nEOF", Allow},
+		// quoted text is judged as before stage 11 (stricter of the two)
+		{"echo \"git push later\" > notes.md", Deny},
+		{"git commit -m 'do not touch /etc/hosts'", AskPerson},
+		{"# git push later\nmake", Allow},
+		{"cp /etc/hosts fixtures/hosts", AskPerson}, // the text's rule, as before stage 11: a cp's words are asked about
+		{"echo x >&2", Allow},
+		{"go test ./... 2>&1 | tee test.log", Allow},
+		{"bash -c 'echo x > /etc/hosts'", AskPerson},
+		{"sh -c \"git push\"", Deny},
+		{"cat <<EOF | sh\ngit push origin HEAD\nEOF", Deny},
+		{"echo $(git push)", Deny},
+		{"echo `git push`", Deny},
+		{"eval \"git push\"", Deny},
+		{"sudo tee /etc/x", AskPerson},
+		{"mkdir -p /usr/local/x", AskPerson},
+		{"echo x &> /etc/y", AskPerson},
+		{"cp a b -t /opt/bin", AskPerson},
+		{"dd if=/dev/zero of=/etc/disk bs=1", AskPerson},
+		{"FOO=1 git push", Deny},
+		{"echo 'x > /etc/y", AskPerson}, // unreadable: judged on its text
+		{"cat .env", AskPerson},
+		{"grep -r token ~/.ssh/config", AskPerson},
+		// round 1 of the review: what the reading must not let past
+		{"/usr/bin/git push origin HEAD", Deny},
+		{"/usr/bin/git checkout main", Deny},
+		{"cat > notes.md <<EOF\n$(git push)\nEOF", Deny},
+		{"cat > notes.md <<'EOF'\n$(git push)\nEOF", Allow}, // a quoted delimiter: literal
+		{"bash --norc -c 'git push'", Deny},
+		{"bash -xc 'git push'", Deny},
+		{"bash <<< 'git push'", Deny},
+		{"cd /tmp/x && rm -rf build", AskPerson},
+		{"cd /etc && echo x > hosts", AskPerson},
+		{"cd src && rm old.go", Allow},
+		{"mv go.mod go.mod.bak", AskPerson},
+		{"node --env-file=.env app.js", AskPerson},
+		{"cat > tasks/a.md <<'EOF'\nnever git push\nEOF\nbash -c 'go vet ./...'", Allow}, // the shell does not read the heredoc
+		{"git commit -m 'never git push'", Deny},
+		{"git commit -m 'add the search'", Allow},
+		{"diff <(git push) x", Deny},
+		// round 2 of the review
+		{"if bash -c 'cat .env'; then :; fi", AskPerson},
+		{"bash -s -- arg <<< 'cat .env'", AskPerson},
+		{"bash -s x <<'EOF'\ncat .env\nEOF", AskPerson},
+		{"bash <<EOF\necho '$(git push)'\nEOF", Deny},
+		{"cd /tmp && bash -c 'rm -rf x'; cd /w/repo-tm-001", AskPerson},
+		{"cp \"go.mod\" vendor/", AskPerson},
+		{"cat > notes.md <<EOF\n$(echo x > go.mod)\nEOF", AskPerson}, // the substitution runs
+		{"cat > notes.md <<'EOF'\n$(echo x > go.mod)\nEOF", Allow},   // literal
+		{"(cd /tmp && ls) && echo x > out.txt", Allow},               // the subshell's cd stays in it
+	}
+	for _, c := range cases {
+		if got := r.Decide("Bash", map[string]any{"command": c.cmd}); got.Decision != c.want {
+			t.Errorf("%q: %v (%s), want %v", c.cmd, got.Decision, got.Reason, c.want)
+		}
+	}
+}
+
 func TestNormalizeQuestions(t *testing.T) {
 	qs := normalizeQuestions(map[string]any{"questions": []any{
 		map[string]any{"question": "Q1?", "header": "H", "options": []any{

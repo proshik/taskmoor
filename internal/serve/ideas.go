@@ -339,7 +339,11 @@ func (s *Service) Grill(ctx context.Context, id string, req GrillRequest) (*Sess
 	}
 	s.publishSession(l)
 	exe, _ := os.Executable()
-	if err := s.launch(l, false, grillAssignment(idea, rep.Snapshot, wt, branch, exe), plan); err != nil {
+	first := grillAssignment(idea, rep.Snapshot, wt, branch, exe)
+	if plan != nil {
+		first += sandboxNote
+	}
+	if err := s.launch(l, false, first, plan); err != nil {
 		return s.snapshotSession(sid), err
 	}
 	return s.snapshotSession(sid), nil

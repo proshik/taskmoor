@@ -93,6 +93,10 @@ func ProfileHarnessWarnings(cfg *Config, tasks []app.TaskView) []string {
 	return out
 }
 
+// sandboxNote tells a confined agent what the sandbox's git does: the
+// commit lands although git says it cannot lock packed-refs (stage 11).
+const sandboxNote = "\n\nYou run in a sandbox. When you commit, git may print that it cannot create packed-refs.lock in the repository's .git: that is expected, the commit still lands (check with git log); do not try to work around it.\n"
+
 // assignment is the first message of a session: what to do and the rules
 // it works under.
 func assignment(t app.TaskView, snap *project.Snapshot, wt, branch string) string {

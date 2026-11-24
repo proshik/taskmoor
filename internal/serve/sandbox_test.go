@@ -62,7 +62,7 @@ func TestSandboxSettings(t *testing.T) {
 	for _, want := range []string{"/w/repo-tm-001/.git", "/w/repo/.git/hooks", "/w/repo/.git/config", "/w/repo/.git/tasks",
 		"/w/repo/.git/worktrees/repo-tm-001/config.worktree", "/h/.local/state/taskmoor",
 		"/w/repo/.git/refs/heads/main", "/w/repo/.git/refs/heads/main.lock", "/w/repo/.git/logs/refs/heads/main",
-		"/w/repo/.git/HEAD", "/w/repo/.git/index", "/w/repo/.git/packed-refs"} {
+		"/w/repo/.git/HEAD", "/w/repo/.git/index", "/w/repo/.git/packed-refs", "/w/repo/.git/packed-refs.lock"} {
 		if !slices.Contains(sb.Filesystem.DenyWrite, want) {
 			t.Errorf("denyWrite lacks %s", want)
 		}

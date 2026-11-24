@@ -83,7 +83,7 @@ The service (taskmoor serve) and its clients:
   taskmoor device pair | list | revoke ID              devices that reach the board from outside (stage 9)
   taskmoor remote files --vps USER@HOST --auth-domain D [--out DIR]  the tunnel and the VPS's files
   taskmoor acceptance ID [--diff] [--json]             the work to accept: commits, diff, review, checks
-  taskmoor accept ID                                   merge the task's branch into main (trial merge first)
+  taskmoor accept ID --tip C                           merge the task's branch at C into main (trial merge first)
   taskmoor override DECISION N [N…] | --text T          replace a dispatcher answer (sent to the session)
   taskmoor web [--print]                               open the board in the browser (a one-time sign-in link)
 

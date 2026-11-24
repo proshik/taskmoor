@@ -249,6 +249,8 @@ func sessionSettings(p *sandboxPlan, protected []string) string {
 		filepath.Join(p.GitDir, "config.worktree"),
 		// the main checkout's own files and the packed refs
 		filepath.Join(p.CommonDir, "HEAD"), filepath.Join(p.CommonDir, "index"),
+		// packed-refs.lock too: a lock left there would block the person's
+		// git; git (2.50) tries it on every commit and goes on without it
 		filepath.Join(p.CommonDir, "packed-refs"), filepath.Join(p.CommonDir, "packed-refs.lock"),
 		filepath.Join(p.CommonDir, "logs", "HEAD"), filepath.Join(p.CommonDir, "config.worktree"),
 	}
