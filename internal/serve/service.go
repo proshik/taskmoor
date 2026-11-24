@@ -56,6 +56,12 @@ type Service struct {
 	push        pushState   // their push subscriptions (stage 10)
 	ideas       map[string]*Idea
 	decCache    []Ruling // nil: read the store again
+	// suggestions are the dispatcher's profiles per project and task
+	// (stage 13), under mu; kept until the service stops
+	suggestions map[string]Suggestion
+	suggestSem  chan struct{} // suggestion requests reading projects
+	launchMu    sync.Mutex
+	launchOK    map[string]launchCheck // profiles' preflight, remembered briefly
 
 	journal *journal
 	bus     *bus
@@ -218,6 +224,7 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 		keep:        keeper{failed: map[string]time.Time{}, errs: map[string]string{}},
 		dispatchSem: make(chan struct{}, 2),
 		reviewSem:   make(chan struct{}, 1),
+		suggestSem:  make(chan struct{}, 2),
 		UsageClaude: readClaudeUsage, UsageCodex: readCodexUsage, pid: os.Getpid(),
 		usage:   usageState{last: map[string]Usage{}, pause: map[string]time.Time{}},
 		tg:      newTelegram(),
@@ -428,7 +435,10 @@ type RunRequest struct {
 	Project string `json:"project"`
 	Task    string `json:"task"`
 	Profile string `json:"profile,omitempty"`
-	Person  bool   `json:"person,omitempty"`
+	// Suggestion accepts the dispatcher's suggestion by its id (stage 13),
+	// in place of Profile: checked again here, refused when out of date.
+	Suggestion string `json:"suggestion,omitempty"`
+	Person     bool   `json:"person,omitempty"`
 	// Anyway starts it although the plan's usage is below the threshold.
 	Anyway bool `json:"anyway,omitempty"`
 	// auto: a "Keep N busy" start, admitted only while the project's N
@@ -468,7 +478,20 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*Session, error) {
 	if t.NeedsPerson && !req.Person {
 		return nil, refusedf("%s needs a person: run it with --person when you start or permit it (A4)", t.ID)
 	}
-	prof, err := chooseProfile(cfg, rep.Snapshot.Config, t, req.Profile)
+	// the dispatcher's suggestion, accepted by its id (stage 13), checked
+	// against this report's task, route and profiles; said so in the record
+	chosenBy, asked := "", req.Profile
+	if req.Suggestion != "" {
+		if req.Profile != "" {
+			return nil, refusedf("a profile and a suggestion: pick one")
+		}
+		sug, err := s.acceptSuggestion(ctx, cfg, *p, rep, t.ID, req.Suggestion)
+		if err != nil {
+			return nil, err
+		}
+		asked, chosenBy = sug.Profile, "the dispatcher: "+sug.Reason
+	}
+	prof, err := chooseProfile(cfg, rep.Snapshot.Config, t, asked)
 	if err != nil {
 		return nil, err
 	}
@@ -515,7 +538,7 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (*Session, error) {
 	}
 	rec := &Session{ID: id, Project: p.Name, Task: t.ID, Title: t.Title, Profile: prof.Name, Harness: prof.Harness,
 		Model: taskModel(t, prof), Worktree: wt, Branch: branch, State: StatePending, StartedAt: now, UpdatedAt: now,
-		ProjectPath: p.Path, Confined: prof.Confined(), Isolation: prof.Isolation()}
+		ProjectPath: p.Path, Confined: prof.Confined(), Isolation: prof.Isolation(), ChosenBy: chosenBy}
 	if prof.Harness == "claude" {
 		rec.Resume = fmt.Sprintf("cd %s && claude --resume %s", shellQuote(wt), id)
 	}
@@ -1271,9 +1294,11 @@ type ProfileView struct {
 	Harness    string `json:"harness"`
 	Model      string `json:"model,omitempty"`
 	APIBilling bool   `json:"api_billing,omitempty"`
-	Runnable   bool   `json:"runnable"`
-	Confined   bool   `json:"confined"`
-	Isolation  string `json:"isolation"`
+	// Description is what it is good for (the dispatcher reads it).
+	Description string `json:"description,omitempty"`
+	Runnable    bool   `json:"runnable"`
+	Confined    bool   `json:"confined"`
+	Isolation   string `json:"isolation"`
 }
 
 // ProjectState is a registered project with its tasks.
@@ -1296,6 +1321,12 @@ type Route struct {
 	// TaskModel is the task's own model, which wins over any profile's.
 	TaskModel string `json:"task_model,omitempty"`
 	Error     string `json:"error,omitempty"`
+	// From is where the profile comes from (chooseRoute's sources);
+	// Suggestable: the dispatcher may be asked instead (stage 13), and
+	// Suggested is its answer for the task as it is on main now.
+	From        string      `json:"from,omitempty"`
+	Suggestable bool        `json:"suggestable,omitempty"`
+	Suggested   *Suggestion `json:"suggested,omitempty"`
 }
 
 // Snapshot reads every project now and the sessions and asks held.
@@ -1323,7 +1354,7 @@ func (s *Service) Snapshot(ctx context.Context) (*Snapshot, error) {
 		}
 	}
 	for _, p := range cfg.Profiles {
-		out.Profiles = append(out.Profiles, ProfileView{Name: p.Name, Harness: p.Harness, Model: p.Model, APIBilling: p.APIBilling, Runnable: runnable[p.Harness], Confined: p.Confined(), Isolation: p.Isolation()})
+		out.Profiles = append(out.Profiles, ProfileView{Name: p.Name, Harness: p.Harness, Model: p.Model, APIBilling: p.APIBilling, Description: p.Description, Runnable: runnable[p.Harness], Confined: p.Confined(), Isolation: p.Isolation()})
 	}
 	for _, p := range cfg.Projects {
 		ps := ProjectState{Name: p.Name, Path: p.Path, Tasks: []app.TaskView{}, Routes: map[string]Route{},
@@ -1336,11 +1367,22 @@ func (s *Service) Snapshot(ctx context.Context) (*Snapshot, error) {
 				if t.Lifecycle != derive.Backlog {
 					continue
 				}
-				if prof, err := chooseProfile(cfg, rep.Snapshot.Config, t, ""); err != nil {
-					ps.Routes[t.ID] = Route{Error: err.Error()}
+				prof, from, err := chooseRoute(cfg, rep.Snapshot.Config, t, "")
+				r := Route{From: from, TaskModel: t.Task.Model}
+				if err != nil {
+					r.Error = err.Error()
 				} else {
-					ps.Routes[t.ID] = Route{Profile: prof.Name, TaskModel: t.Task.Model}
+					r.Profile = prof.Name
 				}
+				if cfg.DispatcherProfile != "" && suggestable(from) && len(s.suggestCandidates(cfg, t, rep.Snapshot.Root)) > 1 {
+					r.Suggestable = true
+					if s.hasSuggestion(p.Name, t.ID) {
+						if in, err := s.readSuggestInput(ctx, cfg, p, rep, t.ID); err == nil {
+							r.Suggested = s.freshSuggestion(p.Name, t.ID, in.digest)
+						}
+					}
+				}
+				ps.Routes[t.ID] = r
 			}
 		}
 		out.Projects = append(out.Projects, ps)

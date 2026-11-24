@@ -119,6 +119,13 @@ func (c *Client) Position(ctx context.Context) (string, int64, error) {
 }
 
 // Run starts a task.
+// SuggestProfile asks the dispatcher which profile should run a task
+// (stage 13).
+func (c *Client) SuggestProfile(ctx context.Context, project, task string) (*Suggestion, error) {
+	var s Suggestion
+	return &s, c.do(ctx, http.MethodPost, "/api/suggest", map[string]string{"project": project, "task": task}, &s)
+}
+
 func (c *Client) Run(ctx context.Context, req RunRequest) (*Session, error) {
 	var s Session
 	return &s, c.do(ctx, http.MethodPost, "/api/run", req, &s)

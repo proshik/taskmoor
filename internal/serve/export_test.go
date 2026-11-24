@@ -116,3 +116,16 @@ func (s *Service) PushSubscriptions() int {
 	_ = s.pushLoad()
 	return len(s.push.subs)
 }
+
+// HoldDispatchSlots takes both of the dispatcher's slots until released.
+func (s *Service) HoldDispatchSlots() func() {
+	s.dispatchSem <- struct{}{}
+	s.dispatchSem <- struct{}{}
+	return func() { <-s.dispatchSem; <-s.dispatchSem }
+}
+
+// SuggestionsInFlight is how many suggestion requests are past admission.
+func (s *Service) SuggestionsInFlight() int { return len(s.suggestSem) }
+
+// ReadUsageNow reads the plans now.
+func (s *Service) ReadUsageNow() { s.readUsage(context.Background()) }

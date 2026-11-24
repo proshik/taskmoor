@@ -20,38 +20,58 @@ func schemaLoad() (*schema.Schemas, error) { return schema.Load() }
 // tasks.toml's routing for the kind → routing.default → the service's
 // default (C10).
 func chooseProfile(cfg *Config, pc *project.Config, t app.TaskView, asked string) (*Profile, error) {
-	pick := func(name, from string) (*Profile, error) {
+	p, _, err := chooseRoute(cfg, pc, t, asked)
+	return p, err
+}
+
+// chooseRoute is chooseProfile with where the choice came from: "--profile",
+// "task" (its profile or model), "routing.<kind>", "harness" (the task's
+// harness over the fallback), "routing.default" or "default_profile".
+func chooseRoute(cfg *Config, pc *project.Config, t app.TaskView, asked string) (*Profile, string, error) {
+	pick := func(name, from, src string) (*Profile, string, error) {
 		if p := cfg.Profile(name); p != nil {
-			return p, nil
+			return p, src, nil
 		}
-		return nil, refusedf("%s names profile %q, which is not in the service's configuration", from, name)
+		return nil, src, refusedf("%s names profile %q, which is not in the service's configuration", from, name)
+	}
+	taskSrc := ""
+	if t.Task.Model != "" {
+		taskSrc = "task" // its own model: the task chose (stage 13)
 	}
 	switch {
 	case asked != "":
-		return pick(asked, "--profile")
+		return pick(asked, "--profile", "--profile")
 	case t.Task.Profile != "":
-		return pick(t.Task.Profile, t.ID+"'s profile") // an explicit profile wins (A16)
+		return pick(t.Task.Profile, t.ID+"'s profile", "task") // an explicit profile wins (A16)
 	}
 	name, from := cfg.DefaultProfile, "default_profile"
+	src := from
 	switch {
 	case pc != nil && pc.Routing[t.Kind] != "":
-		name, from = pc.Routing[t.Kind], "tasks.toml routing."+t.Kind
+		name, from, src = pc.Routing[t.Kind], "tasks.toml routing."+t.Kind, "routing."+t.Kind
 	case pc != nil && pc.Routing["default"] != "":
-		name, from = pc.Routing["default"], "tasks.toml routing.default"
+		name, from, src = pc.Routing["default"], "tasks.toml routing.default", "routing.default"
 	}
+	if taskSrc != "" {
+		src = taskSrc
+	}
+	explicit := strings.HasPrefix(src, "routing.") && src != "routing.default" || src == "task"
 	// harness is a preference (A16): the routed profile if it is of that
 	// harness, else the first configured one that is, else the route
 	if h := t.Task.Harness; h != "" && h != "any" {
 		if p := cfg.Profile(name); p != nil && p.Harness == h {
-			return p, nil
+			return p, src, nil
 		}
 		for i := range cfg.Profiles {
 			if cfg.Profiles[i].Harness == h {
-				return &cfg.Profiles[i], nil
+				if !explicit {
+					src = "harness"
+				}
+				return &cfg.Profiles[i], src, nil
 			}
 		}
 	}
-	return pick(name, from)
+	return pick(name, from, src)
 }
 
 // taskModel is the model a task runs with: its own `model` over the

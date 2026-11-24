@@ -64,6 +64,9 @@ type Session struct {
 	Confined bool `json:"confined"`
 	// Isolation: "sandbox", "codex" (Codex's workspace-write) or "".
 	Isolation string `json:"isolation"`
+	// ChosenBy says the profile was the dispatcher's suggestion, and why
+	// (stage 13); empty: routed or picked by the person.
+	ChosenBy string `json:"chosen_by,omitempty"`
 	// AgentSession is an ACP agent's own session id (Codex's thread,
 	// OpenCode's session), for resuming and the terminal; Claude's is ID.
 	AgentSession string `json:"agent_session,omitempty"`

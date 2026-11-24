@@ -89,6 +89,9 @@ type Profile struct {
 	Name    string `toml:"name"`
 	Harness string `toml:"harness"`
 	Model   string `toml:"model,omitempty"`
+	// Description is what the profile is good for, which the dispatcher
+	// reads when it suggests one (stage 13).
+	Description string `toml:"description,omitempty"`
 	// APIBilling allows a session of this profile to bill an API key.
 	APIBilling bool `toml:"api_billing,omitempty"`
 	// Command overrides the harness program (default: claude; codex:

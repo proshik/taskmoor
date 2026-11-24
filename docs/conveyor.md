@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-23; stages 1–7 of v1 are implemented, and stages 8 and 9 of v2 (ideas and intake; the web from outside), and stages 10–12 (the phone app, first of Later; a run on real tasks and its fixes; cleaning up).**
+2026-11-23; stages 1–7 of v1 are implemented, and stages 8 and 9 of v2 (ideas and intake; the web from outside), and stages 10–13 (the phone app, first of Later; a run on real tasks and its fixes; cleaning up; the dispatcher's profile).**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -172,7 +172,8 @@ Answered by the person one by one; not re-opened here.
 - **C10 — model routing (2026-11-22).** Profiles plus a table by task kind in
   `tasks.toml`; a field in the task overrides it; the choice is shown and
   changeable at launch. Automatic choice by the dispatcher is not in the
-  design (Later).
+  design (Later). Stage 13 (2026-11-24): the dispatcher suggests a
+  profile on the person's request, only where the default would route.
 - **C12 — standalone, without Guild (2026-11-22).** The person splits
   Guild into a server and clients meanwhile; the conveyor must work on its
   own first, so the whole can be seen separately. Nothing in v1 needs Guild
@@ -1876,6 +1877,90 @@ The smallest loop that runs a real agent on a real task.
    the first version of this stage) the eight tasks' and two ideas'
    worktrees and branches went, main untouched.
 
+### Stage 13 — the dispatcher's profile
+
+- The person's choice (2026-11-24), the next of Later: the dispatcher
+  chooses the model. Asked: on the person's request at launch (not for
+  every start), and `routing.<kind>` outranks it.
+
+#### Stage 13 — implementation decisions (2026-11-24)
+
+1. **Where:** a backlog task whose route is the fallback — tasks.toml
+   `routing.default`, the service's `default_profile`, or the task's
+   `harness` over them. The task's own `profile` or `model` (C10, A16),
+   `routing.<kind>` and the person's pick are never second-guessed; Keep
+   N busy and `taskmoor run` route as before. The snapshot's route says
+   where the profile comes from (`from`) and whether the dispatcher may
+   be asked (`suggestable`: the dispatcher on and two profiles to choose
+   from).
+2. **The call:** the dispatcher's (stage 4: the claude
+   `dispatcher_profile`, no tools, no settings, an empty directory, two
+   minutes, the same two slots, the plan's guard, managed settings and
+   API billing refused). It reads the task file from the main branch
+   (48 KiB at most) and the candidates: runnable profiles, not billing an
+   API key (billing stays the person's choice, A27), of the task's
+   harness if it names one; each with its harness, model, the plan's
+   share left and the profile's new `description`.
+3. **The reply** is JSON `{"profile", "reason"}` (a fenced reply is
+   read); the profile must be one of the candidates and the reason not
+   empty (300 characters kept). Anything else is an error shown in the
+   Run panel; nothing is chosen.
+4. **Kept** in memory per project and task with the digest of the task
+   file on main: a change to the task drops it, a restart forgets it.
+   `POST /api/suggest {project, task}`; the snapshot's route carries it
+   (`suggested`, with its id), the board preselects its profile and says
+   why; Run accepts it by id (decision 6). A session started from it
+   records `chosen_by` ("the dispatcher: <reason>"), shown with the
+   profile.
+5. **Checked:** real repositories in the tests with the Claude fake as
+   the dispatcher (the prompt, the preselection, `chosen_by`, a stale
+   suggestion, every refusal and bad reply); on a copy of the demo
+   project with Claude Sonnet as the dispatcher on the subscription, from
+   the board: a README typo task got `claude-haiku` ("a trivial,
+   well-specified single-word typo fix"), `notes export --json` with
+   tests got `claude` (risky escaping, and Codex had 4% of its plan
+   left); DM-009 run from the suggestion recorded `chosen_by` and ran on
+   Haiku.
+6. **Review r1** (13 findings, all fixed): Run takes a suggestion only by
+   its id (`suggestion`, in place of `profile`) and checks it again
+   against the report it launches from — the task's route, its file at
+   that report's main commit, the project's checkout and the candidates'
+   configuration (a digest of all of them, which is what a suggestion is
+   bound to, so a profile changed under its name or a project name moved
+   to another checkout drops it) — and refuses one out of date; a profile
+   picked by hand is the person's (`chosen_by` empty) even if it is the
+   suggested one. Candidates are only profiles Run could start without
+   an API key: the program on the PATH, Codex with its own provider, no
+   OpenCode. The plan's guard is checked again after the slot; an
+   explicit route to a missing profile is refused before any call; an
+   older request finishing later never replaces a newer suggestion; at
+   most two suggestion requests read projects at a time (a third is told
+   the dispatcher is busy). The board keeps the pending state and the
+   error per task outside the form (a redraw keeps them, no duplicate
+   call) and keeps a profile picked while the dispatcher was asked. The
+   README gives the conditions for the button and the rollback note for
+   `description`.
+7. **Review r2** (14 findings and one from before, all fixed; the last
+   round): a candidate is a profile whose Run preflight passes for the
+   project's checkout (a Codex signed out, a Claude too old for the
+   sandbox are left out), remembered 30 seconds per profile and checkout;
+   a suggestion is bound to every launch setting of the candidates,
+   their sandbox and allowed domains too (nil and an empty list differ);
+   the task is taken from the report's own read (front matter and body
+   at its main commit), so no file is read again. After the slot the
+   dispatcher's profile is read again with its billing, the managed
+   settings and the plan (`dispatcherNow`, which question dispatch uses
+   too); the plan's guard for a dispatcher call counts only keys in its
+   environment, since the call loads no settings. The call counts as an
+   agent (the Mac stays awake) and runs in its own process group, ended
+   as a whole (before, a wrapper's Claude child could outlive a
+   cancelled call). A request overtaken by a newer one says so instead
+   of returning an id Run would refuse. The board keeps a profile edited
+   while the dispatcher was asked (every edit counts, even back to the
+   same value), drops a "Run anyway" offer when the pick changes, and
+   keeps a refused suggestion's error across the redraw. The README says
+   to reload open boards after going back past stage 13.
+
 ### What each stage needs from the person
 
 | Stage | Decision or permission |
@@ -1892,6 +1977,7 @@ The smallest loop that runs a real agent on a real task.
 | 10 | Push in or out, own code or a library; the real check on the phone after stage 9's deployment. |
 | 11 | Nothing new: a run on the demo project with real agents on the subscriptions. |
 | 12 | Nothing new. |
+| 13 | When the dispatcher chooses (on request) and what outranks it (`routing.<kind>`). |
 
 ## Relation to Guild
 

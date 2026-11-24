@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/proshik/taskmoor/internal/gitx"
@@ -162,7 +163,7 @@ func (s *Service) dispatch(l *live, a *Ask) {
 		toPerson(fmt.Sprintf("dispatcher_profile %q is not a configured claude profile", cfg.DispatcherProfile))
 		return
 	}
-	if err := s.guard(*prof, true, false); err != nil { // the plan's usage
+	if err := s.guardConsult(*prof); err != nil { // the plan's usage, as the call bills it
 		toPerson("the dispatcher waits: " + err.Error())
 		return
 	}
@@ -188,7 +189,7 @@ func (s *Service) dispatch(l *live, a *Ask) {
 	}
 	tick.Stop()
 	defer func() { <-s.dispatchSem }()
-	if err := s.guard(*prof, true, false); err != nil { // the plan, again, after the wait
+	if err := s.guardConsult(*prof); err != nil { // the plan, again, after the wait
 		toPerson("the dispatcher waits: " + err.Error())
 		return
 	}
@@ -213,10 +214,14 @@ func (s *Service) dispatch(l *live, a *Ask) {
 			}
 		}
 	}()
-	if err := s.guard(*prof, true, false); err != nil { // the plan, once more, right before the call
-		toPerson("the dispatcher waits: " + err.Error())
+	// the profile, its billing, managed settings and the plan, once more,
+	// right before the call
+	_, now, err := s.dispatcherNow()
+	if err != nil {
+		toPerson(err.Error())
 		return
 	}
+	prof = now
 	s.agentUp() // the dispatcher's call is an agent too (A19)
 	reply, err := s.consult(ctx, *prof, dispatchPrompt(a, docs))
 	s.agentDown()
@@ -541,6 +546,10 @@ func (s *Service) consult(ctx context.Context, prof Profile, prompt string) (str
 		args = append(args, "--model", prof.Model)
 	}
 	cmd := exec.CommandContext(ctx, prog, args...)
+	// its own process group, ended as a whole: a wrapper's Claude child
+	// never outlives the call
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.Dir = dir
 	cmd.Env = agentEnv(s.Env, prof.APIBilling)
 	cmd.Stdin = strings.NewReader(prompt)

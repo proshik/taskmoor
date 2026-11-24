@@ -15,6 +15,8 @@ const COLUMNS = [
 const ENDED = new Set(["complete", "error", "stopped", "stale", "handedOver", "accepted"]);
 
 const S = {
+  suggesting: {}, // the dispatcher's suggestion asked per run form: pending, error
+  draftRev: {}, // edits per draft key
   snap: null,
   accept: {},           // acceptance views by session id, loaded on request
   ideaReview: {},       // intake reviews by idea id, loaded on request
@@ -474,6 +476,7 @@ function draft(el, key) {
     if (el.type === "radio") {
       document.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`).forEach(r => { S.drafts[r.dataset.draft] = r.checked; });
     } else S.drafts[key] = (el.type === "checkbox") ? el.checked : el.value;
+    S.draftRev[key] = (S.draftRev[key] || 0) + 1; // every edit, even back to the same value
   };
   el.addEventListener("input", save);
   el.addEventListener("change", save);
@@ -877,34 +880,71 @@ function taskView(p, t, sess) {
 function runForm(p, t) {
   const route = p.routes[t.id] || {};
   const key = `run:${p.name}/${t.id}`;
-  // an invalid route preselects nothing: the person picks a profile
+  // the dispatcher's suggestion (stage 13) preselects its profile, else
+  // the route; an invalid route preselects nothing: the person picks one
+  const sug = route.suggested;
+  const preselect = sug ? sug.profile : route.profile;
   const select = draft(h("select", { "aria-label": "Profile" },
-    h("option", { value: "", selected: !route.profile, disabled: true }, "Choose a profile…"),
-    S.snap.profiles.map(pr => h("option", { value: pr.name, selected: pr.name === route.profile, disabled: !pr.runnable },
+    h("option", { value: "", selected: !preselect, disabled: true }, "Choose a profile…"),
+    S.snap.profiles.map(pr => h("option", { value: pr.name, selected: pr.name === preselect, disabled: !pr.runnable },
       pr.name + " (" + pr.harness + ((route.task_model || pr.model) ? ", " + (route.task_model || pr.model) : "") + (pr.api_billing ? ", API key" : "") + (pr.confined ? "" : pr.isolation === "codex" ? ", codex sandbox" : ", unconfined") + ")" + (pr.runnable ? "" : " — not runnable")))), key + ":profile");
   const person = t.needs_person ? draft(h("input", { type: "checkbox" }), key + ":person") : null;
   const err = h("div", { class: "err" });
   const run = h("button", { class: "primary", type: "button", disabled: !select.value, onclick: async () => {
     run.disabled = true; err.textContent = "";
+    if (S.suggesting[key] && !S.suggesting[key].pending) delete S.suggesting[key];
     try {
       // the routed profile is the server's to choose (its current config);
       // a profile is sent only when the person picked one
-      const picked = (key + ":profile") in S.drafts || !route.profile;
+      const manual = (key + ":profile") in S.drafts;
+      // the suggestion is accepted by its id, which the server checks again;
+      // a profile the person picked is sent as theirs
+      const accept = !manual && sug && select.value === sug.profile ? sug.id : "";
+      const picked = !accept && (manual || !route.profile);
       const go = async (anyway) => {
-        const s = await api("POST", "/api/run", { project: p.name, task: t.id, profile: picked ? select.value : "", person: !!(person && person.checked), anyway });
+        const s = await api("POST", "/api/run", { project: p.name, task: t.id, profile: picked ? select.value : "", suggestion: accept, person: !!(person && person.checked), anyway });
         forget(key);
         await refresh();
         loadFeed(p.name, t.id, s.id);
       };
       try { await go(false); } catch (e) { if (!offerAnyway(err, e, "Run anyway", go)) throw e; run.disabled = false; }
-    } catch (e) { err.textContent = e.message; run.disabled = false; }
+    } catch (e) {
+      run.disabled = false;
+      // a refused suggestion: the error outlives the redraw that follows
+      if (sug) { S.suggesting[key] = { error: e.message }; refresh(); } else err.textContent = e.message;
+    }
   } }, "Run");
-  select.addEventListener("change", () => { run.disabled = !select.value; });
+  // a new pick drops any "Run anyway" offered for the old one
+  select.addEventListener("change", () => { run.disabled = !select.value; err.replaceChildren(); });
+  // ask the dispatcher where the profile would come from the default; its
+  // state lives outside the form, so a redraw keeps it
+  const st = S.suggesting[key] || {};
+  const ask = route.suggestable ? h("button", { type: "button", disabled: !!st.pending, onclick: async () => {
+    const pk = key + ":profile";
+    const before = S.draftRev[pk] || 0;
+    S.suggesting[key] = { pending: true };
+    renderPanel();
+    let state = {};
+    try {
+      await api("POST", "/api/suggest", { project: p.name, task: t.id });
+      // the suggestion preselects, unless the person picked meanwhile
+      if ((S.draftRev[pk] || 0) === before) delete S.drafts[pk];
+    } catch (e) { state = { error: e.message }; }
+    S.suggesting[key] = state;
+    await refresh();
+  } }, st.pending ? "The dispatcher is reading the task…" : sug ? "Ask again" : "Ask the dispatcher") : null;
   return [h("h3", {}, "Run"),
     route.error ? h("div", { class: "err" }, route.error) : null,
-    h("div", { class: "actions" }, select, run,
+    st.error ? h("div", { class: "err" }, st.error) : null,
+    sug ? h("p", { class: "desc" }, "The dispatcher suggests " + sug.profile + ": " + sug.reason) : null,
+    h("div", { class: "actions" }, select, run, ask,
       person ? h("label", {}, person, " a person starts or permits this run (⚑)") : null),
+    route.from && !sug ? h("p", { class: "desc" }, "Routed by " + routeWord(route.from) + ".") : null,
     err];
+}
+
+function routeWord(from) {
+  return { task: "the task's own profile or model", harness: "the task's harness", default_profile: "the service's default_profile" }[from] || "tasks.toml " + from;
 }
 
 function sessionView(sess) {
@@ -923,7 +963,7 @@ function sessionView(sess) {
   return [h("h3", {}, "Session"),
     h("dl", { class: "facts-list" },
       h("dt", {}, "state"), h("dd", { class: "st-" + sess.state }, stateWord(sess.state) + (sess.error ? " — " + sess.error : "")),
-      h("dt", {}, "profile"), h("dd", {}, sess.profile + (sess.model ? " · " + sess.model : "")),
+      h("dt", {}, "profile"), h("dd", {}, sess.profile + (sess.model ? " · " + sess.model : "") + (sess.chosen_by ? " — chosen by " + sess.chosen_by : "")),
       h("dt", {}, "billing"), h("dd", {}, sess.billing ? billingChip(sess.billing) : "—"),
       h("dt", {}, "sandbox"), h("dd", {}, sess.state === "handedOver"
         ? "taskmoor's last run: " + (sess.confined ? "on" : sess.isolation === "codex" ? "Codex's" : "off") + "; in the terminal, your own agent settings apply"

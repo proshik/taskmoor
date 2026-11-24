@@ -181,6 +181,24 @@ func (s *Service) apiMux(token string, port int) *http.ServeMux {
 	})
 	mux.HandleFunc("GET /api/sessions/{id}/feed", s.hFeed)
 	mux.HandleFunc("POST /api/run", s.hRun)
+	mux.HandleFunc("POST /api/suggest", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Project string `json:"project"`
+			Task    string `json:"task"`
+		}
+		if err := decode(r, &body); err != nil {
+			writeErr(w, err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), suggestionTimeout()) // ends with the request: no call for nobody
+		defer cancel()
+		sug, err := s.SuggestProfile(ctx, body.Project, body.Task)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, sug)
+	})
 	mux.HandleFunc("POST /api/sessions/{id}/stop", s.hStop)
 	mux.HandleFunc("POST /api/sessions/{id}/say", s.hSay)
 	mux.HandleFunc("POST /api/sessions/{id}/release", s.hRelease)

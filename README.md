@@ -103,6 +103,7 @@ stop it and run `opencode auth login`.
 [[profiles]]
 name = "codex"
 harness = "codex"          # ChatGPT sign-in; model = "…" picks one it offers
+description = "larger changes across the code"  # optional: what the dispatcher reads
 
 [[profiles]]
 name = "opencode"
@@ -278,6 +279,25 @@ model = "provider/model"
   taskmoor, remove `dispatcher_profile` from the config (older versions
   refuse unknown keys); the same goes for `usage_threshold` before going
   back past stage 6.
+- **The dispatcher's profile (stage 13).** With the dispatcher on, a
+  task ready to run whose profile would come from the default
+  (`routing.default` or `default_profile`) has **Ask the dispatcher** in
+  its Run panel when at least two profiles could run it: runnable (the
+  program found), not billing an API key (so never OpenCode), of the
+  task's `harness` if it names one. Its short call reads the task, as on
+  the main branch, and those profiles (their harness, model,
+  `description` and the plan's usage left) and suggests one with a
+  reason. The board preselects it; you press Run (or pick another, which
+  is then your pick). A session started with the suggestion says "chosen
+  by the dispatcher" and why. A task's own `profile` or `model` and
+  `routing.<kind>` are never second-guessed; Keep N busy and `taskmoor
+  run` route as before. A suggestion lasts while the task file on main,
+  the project's checkout and those profiles are unchanged and the
+  service runs; Run refuses one that went out of date. Before going back
+  past stage 13, remove `description` from every `[[profiles]]` entry
+  (older versions refuse unknown keys), and after restarting reload open
+  boards, on the Mac and on paired devices (a stage 13 board sends a
+  field older versions refuse).
 - **Codex and OpenCode sessions.** Questions arrive as forms (Codex asks in
   its Default mode with `default_mode_request_user_input`); approvals as
   ACP permission requests, through the same rules as Claude's; what the
