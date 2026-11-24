@@ -1,0 +1,14 @@
+{
+  "name": "taskmoor",
+  "short_name": "taskmoor",
+  "description": "The conveyor's board: agents' questions, approvals and the work to accept.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#161615",
+  "theme_color": "#1f1f1d",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

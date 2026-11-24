@@ -93,6 +93,7 @@ func Serve(ctx context.Context, s *Service, logf func(string, ...any)) error {
 	go s.watch(wctx)
 	go s.pollUsage(wctx)        // the plans' usage (stage 6)
 	s.startTelegram(wctx, port) // the bot (stage 7)
+	s.startPush(wctx)           // devices' notifications (stage 10)
 	select {
 	case <-ctx.Done():
 	case err := <-errc:
@@ -103,6 +104,7 @@ func Serve(ctx context.Context, s *Service, logf func(string, ...any)) error {
 	s.bus.closeAll() // event streams end, so open browsers do not hold the server
 	stopWatch()
 	s.stopTelegram()
+	s.stopPush()
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(sctx); err != nil {
@@ -353,6 +355,69 @@ func (s *Service) apiMux(token string, port int) *http.ServeMux {
 		writeJSON(w, http.StatusOK, map[string]string{"url": s.LoginURL(port)})
 	})
 	mux.HandleFunc("GET /api/projects/{project}/tasks/{id}", s.hTask)
+	// push notifications (stage 10): a paired device's own
+	device := func(w http.ResponseWriter, r *http.Request) string {
+		id, _ := r.Context().Value(deviceKey{}).(string)
+		if id == "" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "notifications are for paired devices (the board from outside)"})
+		}
+		return id
+	}
+	mux.HandleFunc("GET /api/push/key", func(w http.ResponseWriter, r *http.Request) {
+		if device(w, r) == "" {
+			return
+		}
+		k, err := s.PushKey()
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"key": k, "subscribed": s.pushSubscribed(r.Context().Value(deviceKey{}).(string), r.URL.Query().Get("endpoint"))})
+	})
+	mux.HandleFunc("POST /api/push/subscribe", func(w http.ResponseWriter, r *http.Request) {
+		id := device(w, r)
+		if id == "" {
+			return
+		}
+		var body struct {
+			Endpoint string `json:"endpoint"`
+			Keys     struct {
+				P256dh string `json:"p256dh"`
+				Auth   string `json:"auth"`
+			} `json:"keys"`
+		}
+		if err := decode(r, &body); err != nil {
+			writeErr(w, err)
+			return
+		}
+		if err := s.PushSubscribe(id, PushSub{Endpoint: body.Endpoint, P256dh: body.Keys.P256dh, Auth: body.Keys.Auth}); err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"subscribed": true})
+	})
+	mux.HandleFunc("POST /api/push/unsubscribe", func(w http.ResponseWriter, r *http.Request) {
+		id := device(w, r)
+		if id == "" {
+			return
+		}
+		var body struct {
+			Endpoint string `json:"endpoint"`
+		}
+		if err := decode(r, &body); err != nil {
+			writeErr(w, err)
+			return
+		}
+		if body.Endpoint == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "which subscription (endpoint)"})
+			return
+		}
+		if err := s.PushUnsubscribe(id, body.Endpoint); err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"subscribed": false})
+	})
 	// devices (stage 9): made and revoked on the Mac only
 	local := func(r *http.Request) bool {
 		kind, _ := s.authorize(r, token)

@@ -158,6 +158,22 @@ model = "provider/model"
   docker-compose.yml (Caddy, Pocket ID, oauth2-proxy, pinned versions),
   .env (with new secrets, mode 0600) and the restricted authorized_keys
   line, with a README of the steps; it installs and deploys nothing.
+- **The board as a phone app (stage 10).** From outside the board
+  installs as an app (Add to Home Screen): a manifest, an icon and a
+  service worker that keeps the board's own files for when there is no
+  network (the API is never cached; the last view shows, marked
+  Disconnected). On a phone the layout is one column with the panel on
+  the whole screen. In Needs you, **Notify me** subscribes the paired
+  device to Web Push: a question or approval for you, and each reminder,
+  arrives as a notification that opens the inbox. The message is
+  encrypted on the Mac for that browser (RFC 8291) and signed with the
+  service's VAPID key (RFC 8292, kept in the store); an approval's says
+  only that one waits. On an iPhone this needs the board on the Home
+  Screen (iOS 16.4 or later). Revoking a device stops every new
+  notification to it; one its push service had already accepted may still
+  arrive while the phone was offline (they are kept 6 hours at most).
+  **sign out** (from outside) forgets the board on the device and ends the
+  VPS's sign-in on a page of its own.
 - **Telegram (stage 7).** Questions and approvals reach your Telegram:
   create a bot with @BotFather, then `taskmoor telegram setup` (the token
   is read from stdin, kept in the store with mode 0600, never shown) and

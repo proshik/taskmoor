@@ -3,6 +3,8 @@ package serve
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 )
 
@@ -65,4 +67,52 @@ func SetRemoteStreamTTL(d time.Duration) func() {
 	old := remoteStreamTTL
 	remoteStreamTTL = d
 	return func() { remoteStreamTTL = old }
+}
+
+// SetPushTarget lets the tests' push service in (any host, its TLS); the
+// returned func puts both back.
+func SetPushTarget(rt http.RoundTripper) func() {
+	oldOK, oldRT := pushHostOK, pushClient.Transport
+	pushHostOK = func(e string) bool { return strings.HasPrefix(e, "https://127.0.0.1:") }
+	pushClient.Transport = rt
+	return func() { pushHostOK, pushClient.Transport = oldOK, oldRT }
+}
+
+// SetPushQueueMax bounds the push queue; the func puts it back.
+func (s *Service) SetPushQueueMax(n int) func() {
+	s.push.mu.Lock()
+	old := s.push.limit
+	s.push.limit = n
+	s.push.mu.Unlock()
+	return func() { s.push.mu.Lock(); s.push.limit = old; s.push.mu.Unlock() }
+}
+
+// PushKick wakes the push sender.
+func (s *Service) PushKick() {
+	select {
+	case s.push.wake <- struct{}{}:
+	default:
+	}
+}
+
+// SetPushWriteFail makes push.json unwritable (nil: writable again).
+func (s *Service) SetPushWriteFail(err error) {
+	s.push.mu.Lock()
+	defer s.push.mu.Unlock()
+	if err == nil {
+		s.push.writeFail = nil
+		return
+	}
+	s.push.writeFail = func() error { return err }
+}
+
+// PushGC forgets revoked devices' subscriptions now.
+func (s *Service) PushGC() { s.pushGC() }
+
+// PushSubscriptions counts the subscriptions kept.
+func (s *Service) PushSubscriptions() int {
+	s.push.mu.Lock()
+	defer s.push.mu.Unlock()
+	_ = s.pushLoad()
+	return len(s.push.subs)
 }

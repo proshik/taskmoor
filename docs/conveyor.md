@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-23; stages 1–7 of v1 are implemented, and stages 8 and 9 of v2 (ideas and intake; the web from outside).**
+2026-11-23; stages 1–7 of v1 are implemented, and stages 8 and 9 of v2 (ideas and intake; the web from outside), and stage 10 (the phone app, first of Later).**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -1653,6 +1653,86 @@ The smallest loop that runs a real agent on a real task.
    Devices button, broken in r2's commit by an edit of the agent's, was
    fixed and checked in the browser.
 
+### Stage 10 — the board as a phone app (Later: "PWA first")
+
+- The person's choices (2026-11-24): the PWA first of the Later list, with
+  push notifications, implemented on Go's standard library (no new
+  dependency).
+
+#### Stage 10 — implementation decisions (2026-11-24)
+
+1. **The app.** `manifest.webmanifest` (standalone, the icon drawn as
+   three board columns, 180/192/512 px), `sw.js` and the iOS meta tags.
+   The service worker caches only the board's own files, network first
+   (a new version shows at once), never `/api/` or the VPS's sign-in; the
+   board keeps its last snapshot in the device's storage (cleared on
+   sign-out) and shows it, marked Disconnected, when the service cannot
+   be reached; it remembers whether it is the board from outside.
+2. **The phone's layout** (under 900 px): one column, the top bar wraps,
+   the panel takes the whole screen within the safe areas, controls at
+   least 36 px, inputs at 16 px (iOS does not zoom).
+3. **Web Push, own code.** RFC 8291's aes128gcm encryption (ECDH P-256,
+   HKDF-SHA-256, AES-128-GCM, one record) checked byte for byte against
+   the RFC's example, and RFC 8292's VAPID (an ES256 JWT for the
+   endpoint's origin, 12 hours, `sub` the board's https origin). The
+   VAPID key is made once in `<store>/vapid.json` (0600).
+4. **Subscriptions** belong to paired devices only (the board from
+   outside): `GET /api/push/key`, `POST /api/push/subscribe`,
+   `/unsubscribe`, kept in `<store>/push.json`, at most 4 per device,
+   only to a known push service's https host (Apple's, Google's,
+   Mozilla's, Microsoft's) so a device cannot make the Mac post
+   elsewhere; a subscription answered 404 or 410 is forgotten; revoking
+   the device forgets its subscriptions.
+5. **What is pushed:** an ask that waits for the person (as Telegram is
+   told: after the dispatcher, once per ask) and each reminder (A20). The
+   title is project · task; a question's body is its first question
+   (not a secret one), an approval's only "An approval waits for you";
+   a tag per ask (a newer message replaces it), `Urgency: high`, TTL six
+   hours (a message a push service accepted before a revocation may still
+   arrive within it). A click opens the inbox (`/#inbox`).
+6. **Checked:** the RFC vector, a round trip, the VAPID signature; a fake
+   push service over TLS that decrypts what it gets (the approval's
+   message, the reminder, a 410 that forgets the subscription); in
+   Chrome at iPhone size: the layout, the service worker active, an
+   approval allowed with the device's passkey, the board offline. A real
+   subscription was not made from the headless browser (it would post to
+   Google's push service): that is the person's check on the phone.
+7. **Review r1** (12 findings, all fixed): every POST to a push service
+   and every new subscription is admitted under a gate that revocation
+   holds while it removes the device, and checks that the device is still
+   paired (a revoked device's leftover subscription is dropped, never
+   used); the event follower only queues (a sender posts), so a slow
+   push service cannot drop the follower from the bus, and a queue that
+   overflowed, or a new subscription to the bus, reconciles the open asks
+   not announced yet; a push refused for now (429, 5xx, a network error)
+   is tried again for that subscription after its Retry-After (1 s to
+   10 min, 4 tries in all); any refused credential — an API call or the
+   event stream — clears the board in memory and its offline copy, and a
+   response for a credential gone meanwhile is dropped; the board from
+   outside has a **sign out** that clears the offline copy before the
+   VPS's sign-out; a copy too big for the device's storage is removed
+   rather than left old; the service worker shows its copy when the VPS
+   answers but the Mac does not (5xx); the phone layout keeps to the side
+   safe areas in landscape.
+8. **Review r2** (16 findings, all fixed; the last round): an ask is
+   marked announced only once its message is queued (the queue is
+   bounded, 1024, and an overflow reconciles); the reconciliation also
+   sends a reminder whose event was missed (from the clients' reminder
+   clock); each message of an ask has a version, and a retry is dropped
+   once the ask is answered or a newer message of it was queued; the
+   revocation's wording says what a push service already holds may still
+   arrive (TTL six hours); a revoked device's subscriptions left by a
+   failed write are cleared every minute; a subscription's key must be a
+   point of P-256; the board's sign out lands on `/signed-out`, a page
+   Caddy serves outside the sign-in (no automatic sign-in again); every
+   sign-out, refusal or VPS refusal forgets the board in all tabs of the
+   origin (a session generation in storage, the storage event) and drops
+   responses of an older generation; a 401 signs out only the credential
+   it was sent with; a copy the storage refuses removes the older one;
+   the service worker installs only with the page, script and styles
+   cached (the rest best effort); number and password fields get the
+   phone sizes too.
+
 ### What each stage needs from the person
 
 | Stage | Decision or permission |
@@ -1666,6 +1746,7 @@ The smallest loop that runs a real agent on a real task.
 | 7 | The bot token and the person's Telegram account id. |
 | 8 | Nothing new; a real grilling runs on the subscription. |
 | 9 | The outer sign-in, the WebAuthn library, who deploys; at the end the VPS, its domains and the deployment, which the person does. |
+| 10 | Push in or out, own code or a library; the real check on the phone after stage 9's deployment. |
 
 ## Relation to Guild
 

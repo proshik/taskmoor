@@ -98,9 +98,23 @@ fieldset.plain { border: 0; padding: 0; margin: 0; }
 @media (max-width: 900px) {
   .board { grid-template-columns: 1fr; }
   .facts { display: none; }
+  /* a phone: the top bar wraps, the panel takes the screen, targets are
+     big enough for a thumb */
+  .top { flex-wrap: wrap; gap: 8px; padding: calc(6px + env(safe-area-inset-top)) 10px 6px; }
+  .panel { top: 0; width: 100%; border-left: 0;
+    padding: calc(14px + env(safe-area-inset-top)) calc(14px + env(safe-area-inset-right)) calc(40px + env(safe-area-inset-bottom)) calc(14px + env(safe-area-inset-left)); }
+  .close { top: calc(8px + env(safe-area-inset-top)); right: calc(12px + env(safe-area-inset-right)); font-size: 22px; padding: 6px 12px; }
+  .board { padding-left: calc(14px + env(safe-area-inset-left)); padding-right: calc(14px + env(safe-area-inset-right)); }
+  button { min-height: 36px; }
+  select, input[type=text], input[type=number], input[type=password] { min-height: 36px; font-size: 16px; } /* 16px: iOS does not zoom in */
+  textarea { font-size: 16px; }
+  .ask label { display: block; padding: 6px 0; }
+  .feed li { grid-template-columns: 54px 1fr; }
+  .feed .k { display: none; }
 }
 
 .ask pre.preview { margin: 4px 0 6px 22px; padding: 6px 8px; max-height: 16em; overflow: auto; white-space: pre-wrap; font-size: 12px; border: 1px solid var(--line, #ccc); border-radius: 4px; }
 
 .add-idea { width: 100%; margin-bottom: 8px; }
 .card.idea .id { font-size: 11px; }
+.push { margin: 6px 0 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }

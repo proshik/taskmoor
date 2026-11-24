@@ -53,6 +53,7 @@ type Service struct {
 	ideaMu      sync.Mutex  // grilling, approving and dropping ideas, one at a time
 	ideaSave    sync.Mutex  // an idea's record, from copy to store
 	rm          remoteState // paired devices and their passkeys (stage 9)
+	push        pushState   // their push subscriptions (stage 10)
 	ideas       map[string]*Idea
 	decCache    []Ruling // nil: read the store again
 
@@ -221,7 +222,7 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 		usage:   usageState{last: map[string]Usage{}, pause: map[string]time.Time{}},
 		tg:      newTelegram(),
 		journal: j, bus: newBus(), sessions: map[string]*live{}, asks: map[string]*Ask{}, owners: map[string]*os.File{},
-		ideas: map[string]*Idea{}, rm: newRemoteState()}
+		ideas: map[string]*Idea{}, rm: newRemoteState(), push: newPushState()}
 	s.auth = newWebAuth(func() time.Time { return s.Now() }, filepath.Join(paths.Store, "web-sessions.json"))
 	if err := s.loadIdeas(); err != nil {
 		lock.Close()

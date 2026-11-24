@@ -33,7 +33,7 @@ const S = {
 };
 
 function localGet(k) { try { return localStorage.getItem("taskmoor." + k); } catch { return null; } }
-function localSet(k, v) { try { if (v === null) localStorage.removeItem("taskmoor." + k); else localStorage.setItem("taskmoor." + k, v); } catch { /* private window */ } }
+function localSet(k, v) { try { if (v === null) localStorage.removeItem("taskmoor." + k); else localStorage.setItem("taskmoor." + k, v); return true; } catch { return false; /* private window, full storage */ } }
 
 // h builds an element: h("div", {class: "x", onclick: f}, child, "text", …)
 function h(tag, attrs, ...kids) {
@@ -89,7 +89,8 @@ function credKey() { return S.remote ? "device" : "token"; }
 function authHeader() { return (S.remote ? "Device " : "Bearer ") + (localGet(credKey()) || ""); }
 
 async function api(method, path, body, stepup) {
-  if (!localGet(credKey())) { showSignin(); throw new Unauthorized("not signed in"); }
+  const cred = localGet(credKey());
+  if (!cred) { showSignin(); throw new Unauthorized("not signed in"); }
   const opts = { method, headers: { "Authorization": authHeader() } };
   if (stepup) opts.headers["X-Taskmoor-Stepup"] = stepup;
   if (method !== "GET") {
@@ -100,7 +101,11 @@ async function api(method, path, body, stepup) {
   let data = null;
   try { data = await resp.json(); } catch { /* empty */ }
   if (resp.status === 401 && S.remote && resp.headers.get("X-Taskmoor-Login") === "required") { outerSignIn(); throw new Unauthorized("sign in again"); }
-  if (resp.status === 401) { localSet(credKey(), null); showSignin(); throw new Unauthorized("not signed in"); }
+  if (resp.status === 401) {
+    // only the credential it was sent with is refused: a newer one stays
+    if (localGet(credKey()) === cred) signedOut();
+    throw new Unauthorized("not signed in");
+  }
   if (resp.status === 428 && S.remote && data && data.stepup && !stepup) {
     return api(method, path, body, await stepUp(data.stepup));
   }
@@ -108,9 +113,59 @@ async function api(method, path, body, stepup) {
   return data;
 }
 
+// ---- notifications (stage 10) ----
+
+function pushSupported() { return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window; }
+
+// pushControl: this device's notifications, on or off.
+function pushControl() {
+  const box = h("div", { class: "push" });
+  const err = h("span", { class: "err" });
+  if (!pushSupported()) {
+    box.replaceChildren(h("span", { class: "desc" }, "Notifications: this browser has none here. On an iPhone, add the board to the Home Screen (Share → Add to Home Screen) and open it from there."));
+    return box;
+  }
+  const draw = async () => {
+    let on = false;
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) on = !!(await api("GET", "/api/push/key?endpoint=" + encodeURIComponent(sub.endpoint))).subscribed;
+    } catch { /* shown as off */ }
+    const denied = Notification.permission === "denied";
+    box.replaceChildren(h("span", {}, "Notifications: " + (on ? "on" : denied ? "blocked in this browser's settings" : "off") + " "),
+      denied ? null : h("button", { type: "button", class: on ? "" : "primary", onclick: async () => {
+        err.textContent = "";
+        try { if (on) await pushOff(); else await pushOn(); } catch (e) { err.textContent = e.message; }
+        draw();
+      } }, on ? "Turn off" : "Notify me"), " ", err);
+  };
+  draw();
+  return box;
+}
+
+async function pushOn() {
+  if (await Notification.requestPermission() !== "granted") throw new Error("notifications were not allowed");
+  const reg = await navigator.serviceWorker.ready;
+  const { key } = await api("GET", "/api/push/key");
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToBuf(key) });
+  const j = sub.toJSON();
+  await api("POST", "/api/push/subscribe", { endpoint: j.endpoint, keys: j.keys });
+}
+
+async function pushOff() {
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  if (!sub) return;
+  await api("POST", "/api/push/unsubscribe", { endpoint: sub.endpoint });
+  await sub.unsubscribe();
+}
+
 // outerSignIn: the VPS's sign-in has expired (the device stays paired):
 // the whole page goes through it again.
 function outerSignIn() {
+  forgetBoard(); // refused by the VPS: nothing stays for an offline start
   location.assign("/oauth2/sign_in?rd=" + encodeURIComponent(location.href));
 }
 
@@ -166,8 +221,46 @@ async function stepUp(action) {
   return f.stepup;
 }
 
+// signedOut: the credential was refused — nothing of the board stays, in
+// memory or in this device's storage.
+function signedOut() {
+  localSet(credKey(), null);
+  forgetBoard();
+  showSignin();
+}
+
+// forgetBoard drops the board here and in every tab of this origin (the
+// session generation changes, so their responses in flight are dropped
+// too); the device stays paired.
+function forgetBoard() {
+  localSet("session", String(Date.now()) + Math.random());
+  localSet("snap", null);
+  clearBoard();
+}
+
+function clearBoard() {
+  S.snap = null; S.feed = null; S.body = null; S.inbox = false; S.devices = false; S.selected = null;
+  S.gen++; if (S.abort) { S.abort.abort(); S.abort = null; }
+}
+
+// signOutOutside: from outside, the VPS's sign-out, to a page outside the
+// sign-in (so it does not sign straight back in); the board is forgotten
+// first.
+function signOutOutside() {
+  forgetBoard();
+  location.assign("/oauth2/sign_out?rd=" + encodeURIComponent("/signed-out"));
+}
+
+// another tab signed out, was refused or paired again: this one forgets
+// what it shows, and reads again if there is still a credential
+window.addEventListener("storage", (e) => {
+  if (!["taskmoor.device", "taskmoor.token", "taskmoor.session"].includes(e.key)) return;
+  clearBoard();
+  if (localGet(credKey())) refresh(); else showSignin();
+});
+
 function showSignin() {
-  S.gen++; if (S.abort) { S.abort.abort(); S.abort = null; } // no stream without a sign-in
+  clearBoard(); // no board, and no stream, without a credential
   S.connected = false;
   if (S.remote) pairView();
   document.getElementById("signin").hidden = false;
@@ -239,13 +332,24 @@ function column(t, sess) {
 async function refresh() {
   if (S.refreshing) { S.refreshAgain = true; return; }
   S.refreshing = true;
+  const cred = localGet(credKey()), session = localGet("session");
   try {
     const snap = await api("GET", "/api/snapshot");
+    if (localGet(credKey()) !== cred || localGet("session") !== session) { S.refreshing = false; return; } // signed out meanwhile: dropped
     const old = S.snap;
     if (!(old && old.epoch === snap.epoch && snap.rev < old.rev)) S.snap = snap;
+    // the last view, for opening the board with no network (stage 10)
+    // too big for the device's storage: no copy rather than an old one
+    try {
+      const j = JSON.stringify(S.snap);
+      if (j.length >= 2000000 || !localSet("snap", j)) localSet("snap", null); // no copy rather than an old one
+    } catch { localSet("snap", null); }
   } catch (e) {
     S.refreshing = false;
     if (e instanceof Unauthorized) return;
+    if (!S.snap) { // no network at all: the last view, marked Disconnected
+      try { const c = JSON.parse(localGet("snap") || "null"); if (c && c.projects) { S.snap = c; showBoard(); render(); } } catch { /* none */ }
+    }
     // the service is unreachable or failing: the last view stays, marked
     // Disconnected (never Ended), and the page keeps trying
     disconnected("Disconnected from taskmoor serve (" + e.message + ") — what you see may be out of date. Retrying…");
@@ -285,6 +389,7 @@ function connect() {
   const ctl = new AbortController();
   S.abort = ctl; S.streamEpoch = S.snap.epoch;
   const auth = authHeader();
+  const cred = localGet(credKey());
   (async () => {
     let resp;
     try {
@@ -293,7 +398,8 @@ function connect() {
     } catch { if (gen === S.gen) lost(); return; }
     if (resp.status === 401) {
       if (S.remote && resp.headers.get("X-Taskmoor-Login") === "required") { outerSignIn(); return; }
-      localSet(credKey(), null); showSignin(); return;
+      if (localGet(credKey()) === cred) signedOut();
+      return;
     }
     if (!resp.ok || !resp.body) { if (gen === S.gen) lost(); return; }
     if (gen !== S.gen) return;
@@ -392,6 +498,7 @@ function keepFocus(redraw) {
 // ---- rendering ----
 
 function render() {
+  if (!S.snap) return; // nothing to show: signed out, or not loaded yet
   keepFocus(() => {
     const sel = document.getElementById("project");
     sel.replaceChildren(...S.snap.projects.map(p => h("option", { value: p.name, selected: p === currentProject() }, p.name)));
@@ -938,6 +1045,9 @@ function renderUsage() {
   });
   if (S.snap.agents_running) parts.push(h("span", { class: "awake", title: "the service holds macOS's idle-sleep assertion" }, "agents running — keep the Mac awake (lid open or on power)"));
   if (S.snap.awake_error) parts.push(h("span", { class: "err" }, S.snap.awake_error));
+  if (S.remote) {
+    parts.push(h("button", { type: "button", class: "chip", title: "sign out of the VPS (this device stays paired)", onclick: signOutOutside }, "sign out"));
+  }
   if (!S.remote && S.snap.remote_host) {
     parts.push(h("button", { type: "button", class: "chip", title: "devices that reach the board from https://" + S.snap.remote_host,
       onclick: () => { S.inbox = false; S.selected = null; S.devices = true; render(); loadDevices(); } }, "devices"));
@@ -1015,6 +1125,7 @@ function clock(at) {
 function inboxView() {
   const asks = S.snap.asks;
   const out = [h("h1", {}, "Needs you")];
+  if (S.remote) out.push(pushControl());
   if (!asks.length) out.push(h("p", { class: "empty" }, "Nothing waits for you."));
   for (const a of asks) out.push(askForm(a));
   // what the dispatcher answered (C3): the person can override (a)/(b)
@@ -1128,9 +1239,24 @@ document.getElementById("inbox-btn").addEventListener("click", () => { S.inbox =
 const closePanel = () => { S.inbox = false; S.devices = false; S.selected = null; S.feed = null; S.body = null; render(); };
 document.getElementById("panel-close").addEventListener("click", closePanel);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePanel(); });
+// the board as an app (stage 10): its files for offline, its notifications
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => { /* not a secure context */ });
+
+// a notification opens the inbox (#inbox)
+function inboxFromHash() {
+  if (location.hash !== "#inbox") return; // shown only with a snapshot, which a refused credential clears
+  history.replaceState(null, "", location.pathname);
+  S.inbox = true; S.devices = false; S.selected = null;
+  if (S.snap) render();
+}
+window.addEventListener("hashchange", inboxFromHash);
+inboxFromHash();
+
 // the listener says whether this is the Mac's own board or a device's
 (async () => {
-  try { S.remote = !!(await (await fetch("/api/whoami")).json()).remote; } catch { S.remote = false; }
+  // remembered: with no network the board still knows what it is
+  try { S.remote = !!(await (await fetch("/api/whoami")).json()).remote; localSet("remote", S.remote ? "1" : "0"); }
+  catch { S.remote = localGet("remote") === "1"; }
   if (S.remote) {
     if (localGet("device")) refresh(); else showSignin();
     return;

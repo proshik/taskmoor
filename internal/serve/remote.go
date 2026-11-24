@@ -212,6 +212,9 @@ func (s *Service) Devices() ([]DeviceView, error) {
 
 // RevokeDevice forgets a device: its token and passkey stop at once.
 func (s *Service) RevokeDevice(id string) error {
+	// no push is under way to it, and none starts, while it goes
+	s.push.gate.Lock()
+	defer s.push.gate.Unlock()
 	s.rm.mu.Lock()
 	defer s.rm.mu.Unlock()
 	if err := s.rmLoad(); err != nil {
@@ -226,6 +229,9 @@ func (s *Service) RevokeDevice(id string) error {
 				return err
 			}
 			s.rm.devices = left
+			// its notifications end with it (sending checks the device too,
+			// so a leftover after a failed write reaches no one)
+			_ = s.PushUnsubscribe(id, "")
 			for t, g := range s.rm.stepups {
 				if g.device == id {
 					delete(s.rm.stepups, t)
@@ -378,14 +384,24 @@ func (s *Service) deviceFor(r *http.Request) *Device {
 }
 
 func (s *Service) deviceExists(id string) bool {
+	exists, _ := s.deviceState(id)
+	return exists
+}
+
+// deviceState: whether the device is paired, and whether that is known
+// (the devices could be read).
+func (s *Service) deviceState(id string) (exists, known bool) {
 	s.rm.mu.Lock()
 	defer s.rm.mu.Unlock()
+	if s.rmLoad() != nil {
+		return false, false
+	}
 	for _, d := range s.rm.devices {
 		if d.ID == id {
-			return true
+			return true, true
 		}
 	}
-	return false
+	return false, true
 }
 
 var actionRe = regexp.MustCompile(`^(accept|approve|allow):[A-Za-z0-9._-]{1,128}$`)

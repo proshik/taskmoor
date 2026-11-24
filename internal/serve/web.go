@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"mime"
 	"net/http"
 	"os"
 	"os/exec"
@@ -170,6 +171,11 @@ func (s *Service) hSignIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"token": tok})
+}
+
+func init() {
+	// the app manifest's type (Go's table does not know it)
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
 }
 
 func staticFiles() http.Handler {

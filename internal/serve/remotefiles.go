@@ -219,6 +219,13 @@ services:
 }
 
 {$DOMAIN} {
+	# after the board's sign out: a page of its own, outside the sign-in,
+	# so signing out does not sign straight back in
+	handle /signed-out {
+		header Content-Type "text/html; charset=utf-8"
+		header Cache-Control no-store
+		respond "<!doctype html><meta name=viewport content='width=device-width'><title>taskmoor</title><body style='font:16px -apple-system,sans-serif;margin:40px'><p>Signed out of the board.</p><p><a href='/'>Sign in again</a></p>" 200
+	}
 	handle /oauth2/* {
 		reverse_proxy 127.0.0.1:4180 {
 			header_up X-Real-IP {remote_host}
