@@ -935,6 +935,13 @@ The smallest loop that runs a real agent on a real task.
     file: moving `main` refused, the token, the worktree's `.git` and
     `.git/hooks` refused, an empty commit on the task branch made, the
     repository's hook not run.
+12. **The settings file is not a session (TM-004):** `sessions/` holds
+    `<id>.settings.json` beside `<id>.json`, and loading every `*.json`
+    turned it into an empty session after a restart. The journal loads
+    only `<id>.json` with no dot in `<id>`, whose record's `id` is `<id>`;
+    any other `.json` there (no id, another id, not JSON) is skipped with a
+    warning in the service log and left on disk, rather than refusing to
+    start, because a file the service did not write must not keep it down.
 
 ### Stage 3 — Codex and OpenCode, profiles and routing
 

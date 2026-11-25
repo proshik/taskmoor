@@ -72,6 +72,9 @@ func Serve(ctx context.Context, s *Service, logf func(string, ...any)) error {
 	defer os.Remove(filepath.Join(s.Paths.Store, infoName))
 	srv := &http.Server{Handler: s.Handler(token, port), ReadHeaderTimeout: 10 * time.Second}
 	logf("taskmoor serve %s: http://127.0.0.1:%d, store %s, config %s", s.Version, port, s.Paths.Store, s.Paths.Config)
+	for _, w := range s.loadWarnings {
+		logf("%s", w)
+	}
 	logf("open the board: %s (one-time link; `taskmoor web` makes a new one)", s.LoginURL(port))
 	errc := make(chan error, 2)
 	go func() { errc <- srv.Serve(ln) }()

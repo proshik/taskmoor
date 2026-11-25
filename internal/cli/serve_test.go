@@ -138,6 +138,94 @@ func TestServiceThroughTheCLI(t *testing.T) {
 	}
 }
 
+// serveIn starts `taskmoor serve` for home and returns its stop, which
+// gives what it wrote.
+func serveIn(t *testing.T, home, dir string) func() result {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan result, 1)
+	go func() {
+		var out, errb bytes.Buffer
+		getenv := func(k string) string {
+			if k == "TASKMOOR_HOME" {
+				return home
+			}
+			return os.Getenv(k)
+		}
+		code := cli.Run(ctx, []string{"serve"}, cli.Env{Stdout: &out, Stderr: &errb, Dir: dir, Version: "0.1.0-test", Getenv: getenv, Now: time.Now})
+		served <- result{code, out.String(), errb.String()}
+	}()
+	wctx, wcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer wcancel()
+	if _, err := serve.WaitReady(wctx, filepath.Join(home, "store")); err != nil {
+		cancel()
+		t.Fatalf("%v: %+v", err, <-served)
+	}
+	return func() result {
+		cancel()
+		res := <-served
+		if res.code != 0 {
+			t.Errorf("serve: %d %s", res.code, res.stderr)
+		}
+		return res
+	}
+}
+
+// TM-004: a Claude session's sandbox settings file beside its record was
+// loaded as a session after a restart, an empty UNCONFINED row.
+func TestJournalSettingsFileIsNoSessionAfterARestart(t *testing.T) {
+	r := testrepo.New(t)
+	r.AddTasks(testrepo.Task{ID: "TM-001", Title: "Fix the thing"})
+	home := t.TempDir()
+	fake := filepath.Join(t.TempDir(), "claude")
+	if out, err := exec.Command("go", "build", "-o", fake, "../serve/testdata/fakeclaude").CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	t.Setenv("FAKE_SCENARIO", "work")
+	t.Setenv("FAKE_LOG", filepath.Join(home, "fake.log"))
+	cfg := &serve.Config{Port: freeTCPPort(t), DefaultProfile: "fake", Profiles: []serve.Profile{{Name: "fake", Harness: "claude", Command: fake}}}
+	if err := cfg.Save(filepath.Join(home, "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	if res := runIn(t, home, r.Dir, "project", "add", "."); res.code != 0 {
+		t.Fatalf("project add: %d %s", res.code, res.stderr)
+	}
+
+	stop := serveIn(t, home, r.Dir)
+	res := runIn(t, home, r.Dir, "run", "TM-001")
+	m := regexp.MustCompile(`session ([0-9a-f-]{36})`).FindStringSubmatch(res.stdout)
+	if res.code != 0 || m == nil {
+		t.Fatalf("run: %d %s%s", res.code, res.stdout, res.stderr)
+	}
+	id := m[1]
+	stop()
+
+	// what a confined Claude session leaves beside its record, and a stray
+	sessions := filepath.Join(home, "store", "sessions")
+	for name, body := range map[string]string{
+		id + ".settings.json": `{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true},"permissions":{"deny":["Edit(/x)"]}}`,
+		"stray.json":          `{"note":"not a session"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(sessions, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stop = serveIn(t, home, r.Dir)
+	out := runIn(t, home, r.Dir, "sessions")
+	served := stop()
+	lines := strings.Split(strings.TrimRight(out.stdout, "\n"), "\n")
+	if out.code != 0 || len(lines) != 1 || !strings.HasPrefix(lines[0], "TM-001") || !strings.Contains(lines[0], id) {
+		t.Fatalf("sessions after the restart, want only %s:\n%s%s", id, out.stdout, out.stderr)
+	}
+	if !strings.Contains(served.stderr, "skipped sessions/stray.json: not a session record") {
+		t.Errorf("no warning for the stray file in the service log:\n%s", served.stderr)
+	}
+	if strings.Contains(served.stderr, ".settings.json") {
+		t.Errorf("the settings file is warned about, but it is expected there:\n%s", served.stderr)
+	}
+}
+
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
 	l, err := netListen()

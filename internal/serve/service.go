@@ -67,6 +67,9 @@ type Service struct {
 	bus     *bus
 	auth    *webAuth
 	lock    *os.File // the store's serve.lock, held from Open to Close
+	// loadWarnings are the files in sessions/ that Open skipped as not
+	// session records; Serve logs them.
+	loadWarnings []string
 
 	// runners counts runner goroutines until their last callback returns,
 	// so Shutdown leaves nothing writing behind it.
@@ -236,7 +239,8 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 		return nil, err
 	}
 	s.reconcileIdeas() // an Approve a crash cut off
-	old, err := j.sessions()
+	old, warnings, err := j.sessions()
+	s.loadWarnings = warnings
 	if err != nil {
 		lock.Close()
 		return nil, err
