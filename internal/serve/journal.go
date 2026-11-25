@@ -218,29 +218,43 @@ func (j *journal) activitiesLocked(id string) ([]Activity, error) {
 	return out, sc.Err()
 }
 
-// sessions loads every session record.
-func (j *journal) sessions() ([]*Session, error) {
+// sessions loads every session record: <id>.json, whose record says the
+// same id. The directory holds other files too (a Claude session's
+// <id>.settings.json, the feeds, a write's temporary file): a name with a
+// dot in its stem is not a record and is passed over quietly. A .json that
+// does not hold the record of its own name (no id, another id, not a
+// record at all) is skipped with a warning for the service log, and left
+// on disk.
+func (j *journal) sessions() ([]*Session, []string, error) {
 	des, err := os.ReadDir(j.dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var out []*Session
+	var warnings []string
 	for _, de := range des {
-		if !strings.HasSuffix(de.Name(), ".json") {
+		name := de.Name()
+		id, ok := strings.CutSuffix(name, ".json")
+		if !ok || id == "" || strings.Contains(id, ".") || !de.Type().IsRegular() {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(j.dir, de.Name()))
+		data, err := os.ReadFile(filepath.Join(j.dir, name))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		var s Session
 		if err := json.Unmarshal(data, &s); err != nil {
-			return nil, fmt.Errorf("session %s: %w", de.Name(), err)
+			warnings = append(warnings, fmt.Sprintf("skipped sessions/%s: not a session record (%v)", name, err))
+			continue
+		}
+		if s.ID != id {
+			warnings = append(warnings, fmt.Sprintf("skipped sessions/%s: not a session record (its id is %q, not %q)", name, s.ID, id))
+			continue
 		}
 		out = append(out, &s)
 	}
 	sort.Slice(out, func(i, k int) bool { return out[i].StartedAt < out[k].StartedAt })
-	return out, nil
+	return out, warnings, nil
 }
 
 func stamp(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05Z") }

@@ -85,6 +85,9 @@ func (r runner) serveCmd(ctx context.Context, args []string) int {
 	if err != nil {
 		return r.fail(err, false)
 	}
+	if r.env.ConfigureService != nil {
+		r.env.ConfigureService(svc)
+	}
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	logf := func(format string, a ...any) {
