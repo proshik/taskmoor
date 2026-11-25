@@ -23,6 +23,7 @@ const S = {
   project: localGet("project"),
   selected: null,       // {project, task} whose panel is open
   inbox: false,         // the inbox panel is open
+  guide: false,         // the getting-started guide is open
   body: null,           // {project, task, text} of the open card
   feed: null,           // {project, task, session, bySeq: Map}
   feedError: {},        // session id → time of the last failed load
@@ -503,6 +504,11 @@ function keepFocus(redraw) {
 
 function render() {
   if (!S.snap) return; // nothing to show: signed out, or not loaded yet
+  // the guide opens by itself the first time this browser shows a board
+  if (!S.guideChecked) {
+    S.guideChecked = true;
+    if (localGet("guide-seen") === null && localSet("guide-seen", "1") && !S.selected && !S.inbox) S.guide = true;
+  }
   keepFocus(() => {
     const sel = document.getElementById("project");
     sel.replaceChildren(...S.snap.projects.map(p => h("option", { value: p.name, selected: p === currentProject() }, p.name)));
@@ -534,13 +540,13 @@ function renderBoard() {
     (i.state === "new" || i.state === "grilling" || i.state === "proposed"));
   board.replaceChildren(...COLUMNS.map(([k, name]) => {
     if (k === "ideas") {
-      return h("section", { class: "col ideas" + (ideas.length ? "" : " vacant") },
+      return h("section", { class: "col ideas" + (ideas.length ? "" : " vacant"), "data-col": k },
         h("div", { class: "colhead" }, h("h2", {}, name), h("span", { class: "count" }, ideas.length)),
         h("button", { type: "button", class: "add-idea", onclick: () => openNewIdea(p.name) }, "+ New idea"),
         ideas.map(i => ideaCard(p.name, i)));
     }
     const tasks = cols.get(k).sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
-    return h("section", { class: "col" + (k === "needs" ? " needs" : "") + (tasks.length ? "" : " vacant") },
+    return h("section", { class: "col" + (k === "needs" ? " needs" : "") + (tasks.length ? "" : " vacant"), "data-col": k },
       h("div", { class: "colhead" }, h("h2", {}, name), h("span", { class: "count" }, tasks.length)),
       tasks.length ? tasks.map(t => card(p.name, t, sessions.get(t.id), k)) : h("div", { class: "empty" }, "None"));
   }));
@@ -827,6 +833,7 @@ function renderPanel() {
   const show = (on) => { panel.hidden = !on; document.body.classList.toggle("has-panel", on); };
   if (S.inbox) { show(true); body.replaceChildren(...nodes(inboxView())); return; }
   if (S.devices) { show(true); body.replaceChildren(...nodes(devicesView())); return; }
+  if (S.guide && !S.selected) { show(true); body.replaceChildren(...nodes(guideView())); return; }
   if (S.selected && S.selected.newIdea) { show(true); body.replaceChildren(...nodes(newIdeaView(S.selected.project))); return; }
   if (S.selected && S.selected.idea) {
     const ip = S.snap.projects.find(x => x.name === S.selected.project);
@@ -891,7 +898,7 @@ function runForm(p, t) {
       pr.name + " (" + pr.harness + ((route.task_model || pr.model) ? ", " + (route.task_model || pr.model) : "") + (pr.api_billing ? ", API key" : "") + (pr.confined ? "" : pr.isolation === "codex" ? ", codex sandbox" : ", unconfined") + ")" + (pr.runnable ? "" : " — not runnable")))), key + ":profile");
   const person = t.needs_person ? draft(h("input", { type: "checkbox" }), key + ":person") : null;
   const err = h("div", { class: "err" });
-  const run = h("button", { class: "primary", type: "button", disabled: !select.value, onclick: async () => {
+  const run = h("button", { class: "primary", type: "button", "data-guide": "run", disabled: !select.value, onclick: async () => {
     run.disabled = true; err.textContent = "";
     if (S.suggesting[key] && !S.suggesting[key].pending) delete S.suggesting[key];
     try {
@@ -920,7 +927,7 @@ function runForm(p, t) {
   // ask the dispatcher where the profile would come from the default; its
   // state lives outside the form, so a redraw keeps it
   const st = S.suggesting[key] || {};
-  const ask = route.suggestable ? h("button", { type: "button", disabled: !!st.pending, onclick: async () => {
+  const ask = route.suggestable ? h("button", { type: "button", "data-guide": "ask", disabled: !!st.pending, onclick: async () => {
     const pk = key + ":profile";
     const before = S.draftRev[pk] || 0;
     S.suggesting[key] = { pending: true };
@@ -960,7 +967,7 @@ function sessionView(sess) {
   const mine = sess.state !== "handedOver"; // handed over: the person's now
   const sayKey = "say:" + sess.id;
   const idea = !!sess.idea; // a grilling: no task, no Release, Restart or Accept
-  const say = draft(h("textarea", { placeholder: running ? "An instruction for the agent…" : "An instruction resumes the conversation…" }), sayKey);
+  const say = draft(h("textarea", { "data-guide": "say", placeholder: running ? "An instruction for the agent…" : "An instruction resumes the conversation…" }), sayKey);
   return [h("h3", {}, "Session"),
     h("dl", { class: "facts-list" },
       h("dt", {}, "state"), h("dd", { class: "st-" + sess.state }, stateWord(sess.state) + (sess.error ? " — " + sess.error : "")),
@@ -1038,7 +1045,7 @@ function acceptanceView(sess) {
     catch (e) { err.textContent = e.message; }
   };
   const a = S.accept[sess.id];
-  if (!a) { box.replaceChildren(...head, h("div", { class: "actions" }, h("button", { type: "button", onclick: load }, "Show the work to accept")), err); return box; }
+  if (!a) { box.replaceChildren(...head, h("div", { class: "actions" }, h("button", { type: "button", "data-guide": "accept", onclick: load }, "Show the work to accept")), err); return box; }
   const sendKey = "sendback:" + sess.id;
   const note = draft(h("textarea", { placeholder: "What to change (sent back to the session)…" }), sendKey);
   box.replaceChildren(...[...head,
@@ -1095,7 +1102,7 @@ function cleanupControl(id, worktree) {
       err.textContent = "Kept: " + ((it && it.kept) || "nothing to do");
     } catch (e) { err.textContent = e.message; }
   };
-  return h("div", {}, h("div", { class: "actions" }, h("button", { type: "button", onclick: () => {
+  return h("div", {}, h("div", { class: "actions" }, h("button", { type: "button", "data-guide": "cleanup", onclick: () => {
     if (confirmStep("Move the worktree " + worktree + " to the trash and delete its branch? Only if all of it is in main and nothing is uncommitted; nothing in it is deleted.")) go();
   } }, "Clean up the worktree")), err);
 }
@@ -1175,6 +1182,97 @@ function renderKeep(p) {
       try { await api("POST", `/api/projects/${encodeURIComponent(p.name)}/keep`, { n: Number(n.value) }); forget(key); await refresh(); }
       catch (e) { err.textContent = e.message; }
     } }, "Set"), " ", err);
+}
+
+// ---- the getting-started guide: the steps of a task's way through the
+// conveyor, each ticked from what the board shows, each with a way to see
+// where it happens ----
+
+// spotlight scrolls to an element of the board and marks it for a moment.
+function spotlight(selector) {
+  setTimeout(() => {
+    const el = document.querySelector(selector);
+    if (!el) { banner("Nothing on the board to show for this step yet."); return; }
+    el.scrollIntoView({ block: "center" });
+    el.classList.add("spotlight");
+    setTimeout(() => el.classList.remove("spotlight"), 2600);
+  }, 80);
+}
+
+// openAnd opens a task's panel and then marks one of its controls.
+async function openAnd(project, task, selector) {
+  await openTask(project, task);
+  spotlight(selector);
+}
+
+function guideView() {
+  const p = currentProject();
+  const tasks = p ? p.tasks : [];
+  const latest = p ? latestSessions(p.name) : new Map();
+  const sessions = p ? S.snap.sessions.filter(s => s.project === p.name && !s.idea) : [];
+  const ready = tasks.filter(t => t.lifecycle === "backlog" && t.ready);
+  const inReview = tasks.find(t => column(t, latest.get(t.id)) === "review");
+  const live = sessions.find(s => !ENDED.has(s.state));
+  const accepted = sessions.find(s => s.state === "accepted" && !s.cleaned_up);
+  const ideas = (S.snap.ideas || []).filter(i => p && i.project === p.name);
+  const first = ready[0];
+  const steps = [
+    { title: "Register a project", done: S.snap.projects.length > 0,
+      text: "A project is a git repository with tasks/tasks.toml and one Markdown file per task. Add it from a terminal; the board switches between projects at the top.",
+      cmd: "taskmoor project add ~/work/your-project" },
+    { title: "Have a task ready", done: ready.length > 0 || sessions.length > 0,
+      text: "A task is ready when what it depends on is done and no running task touches the same files. taskmoor validate checks the task files.",
+      cmd: "taskmoor validate", show: () => spotlight('[data-col="ready"]') },
+    { title: "Ask the dispatcher for a profile", optional: true, done: sessions.some(s => s.chosen_by),
+      text: S.snap.dispatcher
+        ? "In a ready task's panel, Ask the dispatcher reads the task and suggests the profile that fits it, with its reason. You can still pick another."
+        : "The dispatcher is off. Set dispatcher_profile in the config to have it suggest profiles and answer what the project's documents already answer.",
+      show: first && S.snap.dispatcher ? () => openAnd(p.name, first.id, '[data-guide="ask"]') : null },
+    { title: "Run the task", done: sessions.length > 0,
+      text: "Run makes the task's worktree and branch and starts the agent in a sandbox, on your subscription.",
+      show: first ? () => openAnd(p.name, first.id, '[data-guide="run"]') : null },
+    { title: "Follow the agent", done: sessions.length > 0,
+      text: "The task's panel shows the feed as the agent works. Say sends it an instruction, Stop stops it; the worktree and the branch stay either way.",
+      show: live ? () => openAnd(p.name, live.task, '[data-guide="say"]') : null },
+    { title: "Answer what needs you", done: sessions.length > 0 && S.snap.asks.length === 0, now: S.snap.asks.length > 0,
+      text: "Questions and approvals the dispatcher cannot settle wait in Needs you, which turns tangerine. Answer there, in Telegram or with taskmoor answer.",
+      show: () => spotlight("#inbox-btn") },
+    { title: "Review and accept", done: sessions.some(s => s.state === "accepted"),
+      text: "When the agent finishes, the code review runs and the task moves to Review. Show the work to accept lists the commits, the diff and the findings; Accept merges the branch into your local main.",
+      show: inReview ? () => openAnd(p.name, inReview.id, '[data-guide="accept"]') : null },
+    { title: "Push", manual: true,
+      text: "taskmoor never pushes. Push main from your terminal when you are ready.", cmd: "git push" },
+    { title: "Clean up", optional: true, done: sessions.some(s => s.cleaned_up),
+      text: "An accepted task's worktree and branch stay until you clean up. The worktree moves to a trash folder beside the repository; nothing in it is deleted.",
+      cmd: "taskmoor cleanup", show: accepted ? () => openAnd(p.name, accepted.task, '[data-guide="cleanup"]') : null },
+    { title: "Keep agents busy", optional: true, done: !!(p && p.keep_busy > 0),
+      text: "Keep busy starts ready tasks by themselves, by priority, until that many run. A task that needs a person is never started this way.",
+      show: () => spotlight("#keep input") },
+    { title: "Turn an idea into tasks", optional: true, done: ideas.length > 0,
+      text: "New idea starts a conversation in which the agent asks you about the idea and writes the tasks on an intake branch; Approve lands them on main.",
+      show: () => spotlight(".add-idea") },
+  ];
+  const counted = steps.filter(s => !s.manual);
+  const doneCount = counted.filter(s => s.done).length;
+  const next = steps.find(s => !s.manual && !s.done && !s.optional);
+  return [
+    h("h1", {}, "Getting started"),
+    h("p", { class: "desc" }, h("span", { class: "mono" }, doneCount + " of " + counted.length), " steps done on " + (p ? p.name : "this board") + ". Each step ticks itself from what the board shows."),
+    h("ol", { class: "guide" }, steps.map((s, i) => h("li", { class: "step" + (s.done ? " done" : "") + (s === next || s.now ? " next" : "") },
+      h("div", { class: "step-head" },
+        h("span", { class: "step-n mono" }, String(i + 1)),
+        h("span", { class: "step-title" }, s.title),
+        s.done ? h("span", { class: "chip sub" }, "done")
+          : s === next || s.now ? h("span", { class: "chip next" }, s.now ? "now" : "next")
+          : s.manual ? h("span", { class: "chip" }, "yours")
+          : s.optional ? h("span", { class: "chip" }, "optional") : null),
+      h("p", { class: "step-text" }, s.text),
+      s.cmd || s.show ? h("div", { class: "actions" },
+        s.cmd ? h("code", {}, s.cmd) : null,
+        s.cmd ? h("button", { type: "button", onclick: () => copy(s.cmd) }, "Copy") : null,
+        s.show ? h("button", { type: "button", onclick: s.show }, "Show me") : null) : null))),
+    h("p", { class: "desc" }, "The Guide button in the top bar opens this again."),
+  ];
 }
 
 // confirmStep is a plain confirmation the person gives in the page.
@@ -1312,8 +1410,9 @@ document.getElementById("project").addEventListener("change", (e) => {
   S.project = e.target.value; localSet("project", S.project);
   S.selected = null; S.feed = null; S.body = null; render();
 });
+document.getElementById("guide-btn").addEventListener("click", () => { S.guide = true; S.inbox = false; S.devices = false; S.selected = null; render(); });
 document.getElementById("inbox-btn").addEventListener("click", () => { S.inbox = true; S.devices = false; S.selected = null; render(); });
-const closePanel = () => { S.inbox = false; S.devices = false; S.selected = null; S.feed = null; S.body = null; render(); };
+const closePanel = () => { S.guide = false; S.inbox = false; S.devices = false; S.selected = null; S.feed = null; S.body = null; render(); };
 document.getElementById("panel-close").addEventListener("click", closePanel);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePanel(); });
 // the panel opens under the top bar, whose height follows its wrapping

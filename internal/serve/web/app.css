@@ -189,6 +189,20 @@ fieldset.plain { border: 0; padding: 0; margin: 0 0 var(--space-xs); min-width: 
 .ask input[type=text] { flex: 1 1 220px; }
 .push { margin: var(--space-xs) 0 var(--space-sm); display: flex; flex-wrap: wrap; gap: var(--space-xs); align-items: center; }
 
+/* the getting-started guide: a ruled list of steps */
+.guide { list-style: none; margin: var(--space-sm) 0 0; padding: 0; border-top: var(--rule-hair) solid var(--color-ink); }
+.guide .step { padding: var(--space-sm) 0; border-bottom: var(--rule-hair) solid var(--color-rule); }
+.guide .step-head { display: flex; align-items: baseline; gap: var(--space-xs); }
+.guide .step-n { min-width: 1.5em; color: var(--color-muted); }
+.guide .step-title { font-weight: 600; font-size: var(--text-md); }
+.guide .step.done .step-title { color: var(--color-muted); }
+.guide .step.next { background: var(--color-accent-soft); margin-inline: calc(-1 * var(--space-sm)); padding-inline: var(--space-sm); }
+.guide .step-text { margin: var(--space-2xs) 0 0 calc(1.5em + var(--space-xs)); max-width: 60ch; color: var(--color-ink-2); }
+.guide .step .actions { margin: var(--space-xs) 0 0 calc(1.5em + var(--space-xs)); }
+.guide code { padding: var(--space-3xs) var(--space-2xs); border-radius: 4px; background: var(--color-paper-3); }
+.chip.next { background: var(--color-accent); color: var(--color-accent-ink); }
+.spotlight { outline: 3px solid var(--color-accent); outline-offset: 3px; border-radius: var(--radius-pill); }
+
 /* signed out, pairing */
 .signin { max-width: 520px; margin: 12dvh auto; padding: var(--space-lg); background: var(--color-paper-2); border-radius: var(--radius-card); box-shadow: 0 0 0 1px var(--color-ink), var(--shadow-card); }
 .signin h1 { margin: 0 0 var(--space-sm); font-size: var(--text-xl); }
