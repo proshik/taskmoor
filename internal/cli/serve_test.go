@@ -3,12 +3,14 @@ package cli_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,7 +74,8 @@ func TestServiceThroughTheCLI(t *testing.T) {
 			}
 			return os.Getenv(k)
 		}
-		code := cli.Run(ctx, []string{"serve"}, cli.Env{Stdout: &out, Stderr: &errb, Dir: r.Dir, Version: "0.1.0-test", Getenv: getenv, Now: time.Now})
+		code := cli.Run(ctx, []string{"serve"}, cli.Env{Stdout: &out, Stderr: &errb, Dir: r.Dir, Version: "0.1.0-test", Getenv: getenv, Now: time.Now,
+			ConfigureService: isolated})
 		served <- result{code, out.String(), errb.String()}
 	}()
 	defer func() {
@@ -138,8 +141,17 @@ func TestServiceThroughTheCLI(t *testing.T) {
 	}
 }
 
+// isolated keeps a service the CLI opens off the person's machine: no
+// plan reading (the Keychain, the network, codex app-server) and Codex
+// never signed in, as the serve package's tests do.
+func isolated(s *serve.Service) {
+	s.UsageClaude, s.UsageCodex = nil, nil
+	s.CodexLogin = func() (string, error) { return "Not logged in", fmt.Errorf("stub") }
+}
+
 // serveIn starts `taskmoor serve` for home and returns its stop, which
-// gives what it wrote.
+// gives what it wrote. The stop runs at the test's end too, if a failure
+// came first; calling it again returns the same result.
 func serveIn(t *testing.T, home, dir string) func() result {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -152,23 +164,29 @@ func serveIn(t *testing.T, home, dir string) func() result {
 			}
 			return os.Getenv(k)
 		}
-		code := cli.Run(ctx, []string{"serve"}, cli.Env{Stdout: &out, Stderr: &errb, Dir: dir, Version: "0.1.0-test", Getenv: getenv, Now: time.Now})
+		code := cli.Run(ctx, []string{"serve"}, cli.Env{Stdout: &out, Stderr: &errb, Dir: dir, Version: "0.1.0-test", Getenv: getenv, Now: time.Now,
+			ConfigureService: isolated})
 		served <- result{code, out.String(), errb.String()}
 	}()
+	var once sync.Once
+	var res result
+	stop := func() result {
+		once.Do(func() {
+			cancel()
+			res = <-served
+			if res.code != 0 {
+				t.Errorf("serve: %d %s", res.code, res.stderr)
+			}
+		})
+		return res
+	}
+	t.Cleanup(func() { stop() })
 	wctx, wcancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer wcancel()
 	if _, err := serve.WaitReady(wctx, filepath.Join(home, "store")); err != nil {
-		cancel()
-		t.Fatalf("%v: %+v", err, <-served)
+		t.Fatalf("%v: %+v", err, stop())
 	}
-	return func() result {
-		cancel()
-		res := <-served
-		if res.code != 0 {
-			t.Errorf("serve: %d %s", res.code, res.stderr)
-		}
-		return res
-	}
+	return stop
 }
 
 // TM-004: a Claude session's sandbox settings file beside its record was
@@ -181,9 +199,13 @@ func TestJournalSettingsFileIsNoSessionAfterARestart(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", fake, "../serve/testdata/fakeclaude").CombinedOutput(); err != nil {
 		t.Fatalf("%v %s", err, out)
 	}
-	t.Setenv("FAKE_SCENARIO", "work")
+	// the session waits and is stopped by the restart: it never completes,
+	// so no review round starts, and the review could not reach the real
+	// revust anyway
+	t.Setenv("FAKE_SCENARIO", "wait")
 	t.Setenv("FAKE_LOG", filepath.Join(home, "fake.log"))
-	cfg := &serve.Config{Port: freeTCPPort(t), DefaultProfile: "fake", Profiles: []serve.Profile{{Name: "fake", Harness: "claude", Command: fake}}}
+	cfg := &serve.Config{Port: freeTCPPort(t), DefaultProfile: "fake", Profiles: []serve.Profile{{Name: "fake", Harness: "claude", Command: fake}},
+		ReviewCommand: "/nonexistent/revust"}
 	if err := cfg.Save(filepath.Join(home, "config.toml")); err != nil {
 		t.Fatal(err)
 	}

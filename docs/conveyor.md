@@ -938,10 +938,16 @@ The smallest loop that runs a real agent on a real task.
 12. **The settings file is not a session (TM-004):** `sessions/` holds
     `<id>.settings.json` beside `<id>.json`, and loading every `*.json`
     turned it into an empty session after a restart. The journal loads
-    only `<id>.json` with no dot in `<id>`, whose record's `id` is `<id>`;
-    any other `.json` there (no id, another id, not JSON) is skipped with a
-    warning in the service log and left on disk, rather than refusing to
-    start, because a file the service did not write must not keep it down.
+    only a regular file `<id>.json` with no dot in `<id>`, whose record's
+    `id` is `<id>`. Names that are not that shape (`<id>.settings.json`,
+    the feeds, a write's temporary file, a directory) are passed over
+    without a word: they are expected there. A `<id>.json` whose content
+    is not JSON, or whose `id` is empty or another, is skipped with a
+    warning in the service log and left on disk; before, a file that was
+    not JSON stopped the service from starting, and a file it did not write
+    must not keep it down. A `<id>.json` that cannot be read (permissions,
+    an I/O error) still fails Open: that is the store going wrong, not a
+    stray, and no warnings are logged then.
 
 ### Stage 3 — Codex and OpenCode, profiles and routing
 

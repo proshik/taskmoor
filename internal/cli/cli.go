@@ -47,6 +47,9 @@ type Env struct {
 	TUI func(ctx context.Context, a *app.App) error
 	// OpenURL opens a link in the browser; nil prints it instead.
 	OpenURL func(url string) error
+	// ConfigureService adjusts the service `serve` opened before it serves
+	// (tests stub the plan readers and Codex's sign-in); nil: as opened.
+	ConfigureService func(*serve.Service)
 }
 
 const usage = `usage:
