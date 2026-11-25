@@ -176,6 +176,7 @@ func (s *Service) hSignIn(w http.ResponseWriter, r *http.Request) {
 func init() {
 	// the app manifest's type (Go's table does not know it)
 	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
+	_ = mime.AddExtensionType(".woff2", "font/woff2") // the board's own fonts
 }
 
 func staticFiles() http.Handler {

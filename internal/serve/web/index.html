@@ -4,10 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>taskmoor</title>
+<meta name="description" content="The taskmoor board: the tasks, the agents at work on them and what waits for you.">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
-<meta name="theme-color" content="#1f1f1d">
+<meta name="theme-color" content="#f4f1ea" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1d1b17" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="stylesheet" href="app.css">
@@ -18,11 +20,12 @@
   <span class="brand">taskmoor</span>
   <select id="project" aria-label="Project"></select>
   <span id="facts" class="facts"></span>
+  <span class="grow"></span>
+  <span id="conn" class="conn" role="status" title="Connection to taskmoor serve">Live</span>
+  <button id="inbox-btn" class="inbox-btn" type="button" aria-label="Inbox">Needs you <b id="inbox-count">0</b></button>
+  <span class="tier-break" aria-hidden="true"></span>
   <span id="keep" class="keep"></span>
   <span id="usage" class="usage"></span>
-  <span class="grow"></span>
-  <button id="inbox-btn" class="inbox-btn" type="button" aria-label="Inbox">Needs you <b id="inbox-count">0</b></button>
-  <span id="conn" class="conn" title="Connection to taskmoor serve">●</span>
 </header>
 <div id="banner" class="banner" hidden></div>
 <main id="board" class="board" aria-label="Board"></main>

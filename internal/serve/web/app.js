@@ -455,6 +455,7 @@ setInterval(() => { if (!S.connected && localGet(credKey())) refresh(); }, 5000)
 function conn() {
   const el = document.getElementById("conn");
   el.className = "conn" + (S.connected ? "" : " off");
+  el.textContent = S.connected ? "Live" : "Offline";
   el.title = S.connected ? "Connected to taskmoor serve" : "Disconnected";
 }
 
@@ -533,15 +534,15 @@ function renderBoard() {
     (i.state === "new" || i.state === "grilling" || i.state === "proposed"));
   board.replaceChildren(...COLUMNS.map(([k, name]) => {
     if (k === "ideas") {
-      return h("section", { class: "col ideas" },
-        h("h2", {}, name + " ", h("span", {}, ideas.length)),
+      return h("section", { class: "col ideas" + (ideas.length ? "" : " vacant") },
+        h("div", { class: "colhead" }, h("h2", {}, name), h("span", { class: "count" }, ideas.length)),
         h("button", { type: "button", class: "add-idea", onclick: () => openNewIdea(p.name) }, "+ New idea"),
         ideas.map(i => ideaCard(p.name, i)));
     }
     const tasks = cols.get(k).sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
-    return h("section", { class: "col" + (k === "needs" ? " needs" : "") },
-      h("h2", {}, name + " ", h("span", {}, tasks.length)),
-      tasks.length ? tasks.map(t => card(p.name, t, sessions.get(t.id), k)) : h("div", { class: "empty" }, "—"));
+    return h("section", { class: "col" + (k === "needs" ? " needs" : "") + (tasks.length ? "" : " vacant") },
+      h("div", { class: "colhead" }, h("h2", {}, name), h("span", { class: "count" }, tasks.length)),
+      tasks.length ? tasks.map(t => card(p.name, t, sessions.get(t.id), k)) : h("div", { class: "empty" }, "None"));
   }));
 }
 
@@ -550,7 +551,7 @@ function ideaSession(i) { return i.session ? S.snap.sessions.find(s => s.id === 
 function ideaCard(project, i) {
   const sess = ideaSession(i);
   const meta = [h("span", { class: "chip" }, i.state)];
-  if (sess && !ENDED.has(sess.state)) meta.push(h("span", { class: "st-" + sess.state }, "● " + stateWord(sess.state)));
+  if (sess && !ENDED.has(sess.state)) meta.push(h("span", { class: "st-" + sess.state }, stateWord(sess.state)));
   if (i.tasks && i.tasks.length) meta.push(h("span", {}, i.tasks.join(", ")));
   const waiting = sess && sess.state === "awaitingInput";
   return h("article", {
@@ -729,12 +730,12 @@ function card(project, t, sess, col) {
   if (t.needs_person) meta.push(h("span", { class: "chip", title: "needs a person" }, "⚑"));
   if (col === "backlog" && t.reasons.length) meta.push(h("span", {}, t.reasons[0]));
   if (sess && (col === "running" || col === "needs" || col === "review" || !ENDED.has(sess.state))) {
-    meta.push(h("span", { class: "st-" + sess.state }, "● " + stateWord(sess.state)));
+    meta.push(h("span", { class: "st-" + sess.state }, stateWord(sess.state)));
     if (sess.billing) meta.push(billingChip(sess.billing));
     if (!sess.confined) meta.push(isolationChip(sess.isolation));
     if (sess.review) meta.push(h("span", { class: "chip", title: "code review (revust)" }, "review " + sess.review.done + "/" + sess.review.rounds + " " + reviewState(sess.review, sess)));
   } else if (t.harness) {
-    meta.push(h("span", { class: "st-" + t.harness.status }, "● " + t.harness.status));
+    meta.push(h("span", { class: "st-" + t.harness.status }, t.harness.status));
   }
   if (sess && sess.review && ENDED.has(sess.state) && !(col === "running" || col === "needs" || col === "review") && reviewState(sess.review, sess) === "postponed, not run") {
     meta.push(h("span", { class: "chip", title: "its code review never ran" }, "review not run"));
@@ -861,8 +862,8 @@ function renderPanel() {
 }
 
 function taskView(p, t, sess) {
-  const out = [h("h1", {}, t.id + "  " + t.title)];
-  const facts = [["lifecycle", t.lifecycle], ["priority", "P" + t.priority], ["kind", t.kind], ["component", t.component]];
+  const out = [h("h1", {}, t.title)];
+  const facts = [["id", h("span", { class: "mono" }, t.id)], ["lifecycle", t.lifecycle], ["priority", "P" + t.priority], ["kind", t.kind], ["component", t.component]];
   if (t.depends_on.length) facts.push(["depends on", t.depends_on.join(", ")]);
   facts.push(["touches", t.touches.join(", ")]);
   if (t.merge_commit) facts.push(["merge", t.merge_commit.slice(0, 10)]);
@@ -972,7 +973,7 @@ function sessionView(sess) {
         : h("span", { class: "chip api" }, "off — the agent's commands run as you")),
       h("dt", {}, "worktree"), h("dd", { class: "mono" }, sess.worktree),
       h("dt", {}, "resume"), h("dd", { class: "mono" }, sess.resume)),
-    h("div", { class: "actions" },
+    h("div", { class: "actions tools" },
       act("Copy cd", () => copy("cd " + shellQuote(sess.worktree))),
       S.remote ? null : act("Open in Finder", () => api("POST", `/api/sessions/${sid}/open`, { with: "finder" })),
       S.remote ? null : act("Open in editor", () => api("POST", `/api/sessions/${sid}/open`, { with: "editor" })),
@@ -980,7 +981,8 @@ function sessionView(sess) {
         if (!confirmStep("Stop the agent and continue this conversation in your terminal?")) return;
         const r = await api("POST", `/api/sessions/${sid}/handover`, {});
         await copy(r.resume); banner("Copied: " + r.resume + (idea ? " — commit the tasks there, then Approve the idea here." : " — then `taskmoor review " + sess.task + "` when done."));
-      }) : null,
+      }) : null),
+    h("div", { class: "actions control" },
       running ? act("Stop", () => api("POST", `/api/sessions/${sid}/stop`, {}), "danger") : null,
       mine && !idea ? restartControl(sess, act) : null,
       mine && !idea ? act("Release", async () => {
@@ -1118,7 +1120,7 @@ function renderUsage() {
     const title = (u.windows || []).map(w => w.name + " " + w.left + "%" + (w.resets_at ? " (resets " + w.resets_at + ")" : "")).join(", ") + (u.error ? " — last read failed: " + u.error : "");
     return h("span", { class: "chip" + (low ? " api" : ""), title }, u.harness + " " + (u.left >= 0 ? u.left + "%" : "?"));
   });
-  if (S.snap.agents_running) parts.push(h("span", { class: "awake", title: "the service holds macOS's idle-sleep assertion" }, "agents running — keep the Mac awake (lid open or on power)"));
+  if (S.snap.agents_running) parts.push(h("span", { class: "awake", title: "the service holds macOS's idle-sleep assertion" }, "Agents running: keep the Mac awake (lid open or on power)"));
   if (S.snap.awake_error) parts.push(h("span", { class: "err" }, S.snap.awake_error));
   if (S.remote) {
     parts.push(h("button", { type: "button", class: "chip", title: "sign out of the VPS (this device stays paired)", onclick: signOutOutside }, "sign out"));
@@ -1314,6 +1316,12 @@ document.getElementById("inbox-btn").addEventListener("click", () => { S.inbox =
 const closePanel = () => { S.inbox = false; S.devices = false; S.selected = null; S.feed = null; S.body = null; render(); };
 document.getElementById("panel-close").addEventListener("click", closePanel);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePanel(); });
+// the panel opens under the top bar, whose height follows its wrapping
+const topBar = document.querySelector(".top");
+const setTop = () => document.documentElement.style.setProperty("--top-h", topBar.offsetHeight + "px");
+if ("ResizeObserver" in window) new ResizeObserver(setTop).observe(topBar);
+setTop();
+
 // the board as an app (stage 10): its files for offline, its notifications
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => { /* not a secure context */ });
 

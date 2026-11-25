@@ -3,10 +3,11 @@
 // the service pushes to a paired device.
 "use strict";
 
-const SHELL = "taskmoor-shell-v1";
-const FILES = ["/", "/app.js", "/app.css", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png"];
+const SHELL = "taskmoor-shell-v2";
+const FILES = ["/", "/app.js", "/app.css", "/tokens.css", "/base.css", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png",
+  "/fonts/redhattext-latin.woff2", "/fonts/redhattext-latin-ext.woff2", "/fonts/redhatmono-latin.woff2", "/fonts/redhatmono-latin-ext.woff2"];
 
-const CORE = ["/", "/app.js", "/app.css"]; // without these no offline start
+const CORE = ["/", "/app.js", "/app.css", "/tokens.css", "/base.css"]; // without these no offline start
 
 self.addEventListener("install", (e) => {
   // the core must be cached, or the install fails and is tried again on
