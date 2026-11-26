@@ -6,7 +6,29 @@ and how to use it; this file says how to change it.
 ## The project
 
 - Go 1.26, one module (`github.com/proshik/taskmoor`), one binary
-  (`cmd/taskmoor`). The package map is in the README's **Layout**.
+  (`cmd/taskmoor`). The packages:
+
+  ```
+  cmd/taskmoor/        entry point
+  spec/                the format (README, schemas, example tasks.toml), embedded
+  internal/gitx        runs git
+  internal/project     tasks.toml, task files, loading a snapshot
+  internal/schema      the embedded schemas, ECMA-262 regexps (regexp2)
+  internal/state       state files: read, atomic write, lock
+  internal/derive      lifecycle, readiness, touches overlap, cycles
+  internal/validate    every check as findings
+  internal/harness     Guild and state-file harness status
+  internal/app         the operations the CLI and the TUI share
+  internal/finding     the finding type
+  internal/text        control characters out of printed text
+  internal/cli         subcommands, output, exit codes
+  internal/tui         the Bubble Tea board
+  internal/serve       taskmoor serve: config, journal, rules, the Claude runner, API, client
+  internal/testrepo    real git repositories for tests
+  skills/taskmoor/     how an agent uses taskmoor
+  tasks/               taskmoor's own tasks, in its own format
+  docs/                the plan, the conveyor design, the service's guide, images
+  ```
 - `spec/` is the task format (`format = 1`): `README.md` and the JSON
   schemas, embedded in the binary. A change to what a task file or a state
   file may contain is a change to the spec and the schemas first, and
@@ -16,7 +38,8 @@ and how to use it; this file says how to change it.
   service) hold the design and every decision taken, stage by stage. Read
   the parts your change touches before changing it; when it settles
   something new, record it there (as a numbered implementation decision
-  of the stage, with why) and keep the README in step.
+  of the stage, with why) and keep the README and `docs/service.md` (the
+  service's guide) in step.
 - taskmoor's own work is planned in `tasks/` (its own format, prefix
   `TM`): read the task you are given with `taskmoor show ID` and work to
   its Acceptance, Checks and Limits.
@@ -91,3 +114,6 @@ holds, and a mention in the stage's decisions:
   agents).
 - Agents commit locally; pushing, tagging a release and merging pull
   requests are the maintainer's.
+- A release is a tag: pushing `vX.Y.Z` builds the binaries for macOS and
+  Linux (arm64, amd64) with the version set, and publishes them with their
+  checksums as a GitHub release.
