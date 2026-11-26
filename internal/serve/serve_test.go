@@ -658,11 +658,13 @@ func TestSecondOpenLeavesTheLiveServiceAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	rg.waitState(s.ID, serve.StateActive)
+	// the fake has said all it says before its long wait
+	eventually(t, "the agent's response", func() bool { return strings.Contains(rg.feedText(s.ID), "Working for a long time") })
 	before := rg.feedText(s.ID)
 	if _, err := serve.Open(rg.paths, "test", os.Environ(), rg.home); err == nil {
 		t.Fatal("a second service opened the store")
 	}
-	if got := rg.session(s.ID); got.State != serve.StateActive || rg.feedText(s.ID) != before {
+	if got := rg.session(s.ID); got.State != serve.StateActive || rg.feedText(s.ID) != before || strings.Contains(rg.feedText(s.ID), "the service restarted") {
 		t.Fatalf("the live session changed: %s\n%s", got.State, rg.feedText(s.ID))
 	}
 }

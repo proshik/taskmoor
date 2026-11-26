@@ -35,6 +35,12 @@ node --check internal/serve/web/app.js internal/serve/web/sw.js
 `internal/serve` takes about six minutes with `-race`. Run the package you
 changed while working and everything before you finish.
 
+In a taskmoor session (Claude's sandbox) the tests that start a server on
+`127.0.0.1` cannot listen (`bind: operation not permitted`): most of
+`internal/serve` and the `serve` tests of `internal/cli`. Run what you can,
+say in your summary which tests you could not run and why, and the
+maintainer runs them (TM-005 is the task that lifts this).
+
 ## Tests
 
 - Tests run against real git repositories made by `internal/testrepo`, and

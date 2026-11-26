@@ -10,7 +10,7 @@ the person may override any agent decision.
 **Phase 0 is implemented (2026-11-22). C12 (2026-11-22): the conveyor is
 built standalone, without Guild; v1 is split into the stages under
 [v1 in stages](#v1-in-stages-without-guild), agreed by the person
-2026-11-23; stages 1–7 of v1 are implemented, and stages 8 and 9 of v2 (ideas and intake; the web from outside), and stages 10–13 (the phone app, first of Later; a run on real tasks and its fixes; cleaning up; the dispatcher's profile).**
+2026-11-23; stages 1–7 of v1 are implemented, and stages 8 and 9 of v2 (ideas and intake; the web from outside), and stages 10–13 (the phone app, first of Later; a run on real tasks and its fixes; cleaning up; the dispatcher's profile). Since 2026-11-24 taskmoor is published (MIT, v0.1.0) and plans its own work in `tasks/` (see [In use](#in-use-2026-11-2426)); the system is left as it is for now.**
 
 This document extends [`plan.md`](plan.md). The plan's MVP (format, board,
 `claim`/`review`/`release`) is the conveyor's foundation, **phase 0**; nothing
@@ -193,6 +193,9 @@ Answered by the person one by one; not re-opened here.
   dispatcher, revust review, acceptance and merge, the Telegram bot.
   **v2:** ideas and grilling through forms (with "Continue in terminal"), the
   web outside through the VPS.
+  (Of Later, the PWA is stage 10 and the dispatcher's profile stage 13;
+  the live terminal is researched in `docs/research/live-terminal.md`,
+  TM-002.)
   **Later:** mobile app (PWA first), dispatcher model choice, Linux-server
   mode like agterm-server (deferred because Guild builds only on macOS),
   Guild UI buttons (need Penpot first), attaching to a background session's
@@ -1973,6 +1976,61 @@ The smallest loop that runs a real agent on a real task.
    same value), drops a "Run anyway" offer when the pick changes, and
    keeps a refused suggestion's error across the redraw. The README says
    to reload open boards after going back past stage 13.
+
+### In use (2026-11-24…26)
+
+What happened after stage 13, when the person published taskmoor and
+started to use it on itself.
+
+1. **Published.** github.com/proshik/taskmoor, public, MIT. Personal data
+   was taken out of the history before the first push. CI (`ci.yml`):
+   gofmt, `go vet`, `go test -race` on Linux and macOS for every push and
+   pull request; a tag `v*` builds the binaries for macOS and Linux (arm64,
+   amd64) with `scripts/dist.sh` and publishes them with their checksums
+   (`release.yml`). v0.1.0 is the first release. Nothing of taskmoor runs
+   on the VPS: it runs stock images (stage 9), so there is no taskmoor
+   image. `AGENTS.md` says how to work in the repository.
+2. **taskmoor's own tasks.** `tasks/` with the prefix `TM`: TM-001 (the
+   dispatcher's own profile is no candidate, handed over to the terminal),
+   TM-002 (the live terminal, researched and accepted), TM-003 (`serve` as
+   a launchd agent, ⚑), TM-004 (a session's settings file loaded as a
+   phantom session, fixed and accepted), TM-005 (local ports in the
+   sandbox). The board ran them with the dispatcher's suggestions
+   (`chosen_by` on the sessions).
+3. **What the run showed.** Claude's sandbox does not let an agent's tests
+   listen on `127.0.0.1`: TM-001's and TM-004's agents committed tests they
+   could not run, and the person ran them (TM-005; `AGENTS.md` says so
+   meanwhile). The review round found three real defects in TM-004's first
+   commit (a test reading the real plan usage among them), all fixed
+   before Accept. An approval waiting while the service restarted is
+   dropped and the session stops; Say resumes it.
+4. **The board redesigned** (2026-11-25, with the Hallmark skill, theme
+   Furrow): ruled lists instead of boxes, an empty stage shrunk to its
+   head, a two-tier top bar (the project, Live or Offline and Needs you,
+   then Keep busy and the plans), the task's panel as a notebook page with
+   the rare actions apart from the controls; tangerine only for what waits
+   for the person and the primary action. Light and dark follow the
+   system. Red Hat Text and Mono are served by taskmoor (`web/fonts`, OFL),
+   since the board works offline and its policy loads nothing from
+   elsewhere; Cyrillic falls back to the system face. The logic, ids and
+   requests are as before.
+5. **The guide.** Guide in the top bar: the steps of a task's way through
+   the conveyor, each ticked from the snapshot (a project, a ready task, a
+   suggestion taken, a session, nothing waiting, an Accept, a cleanup, Keep
+   busy, an idea), push marked as the person's; Show me opens the task or
+   column and marks the control for a moment. It opens by itself the first
+   time a browser shows a board (`guide-seen` in its local storage).
+6. **The store's lock.** `Running` (every CLI command's `Connect`, an
+   agent's hook among them) takes `serve.lock` for a moment to see whether
+   a service holds it; a `taskmoor serve` starting at that moment refused
+   with "another taskmoor serve is running" (seen as a flaky CI failure
+   after a restart in `TestIdeaGrillAndApprove`). `Open` now waits out a
+   momentary holder and an interrupted call for up to a second
+   (`StoreLockWait`); a lock held longer is another service.
+7. **Left as it is.** The service runs in the foreground of a terminal
+   (TM-003 would make it a launchd agent); `~/.local/bin/taskmoor` may be
+   older than a build from `main` (both speak the same API; a release
+   brings them together).
 
 ### What each stage needs from the person
 

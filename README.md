@@ -421,9 +421,15 @@ taskmoor release PRJ-007                # through the service: stops the session
   preselected), the live feed, Say, Stop, Release, Open in Finder / the
   configured editor (`editor = ["code", "-n"]`), and Continue in terminal
   (`taskmoor continue ID` does the same from the CLI), and the inbox with
-  forms. It follows the service's events and shows "Disconnected" while the
+  forms. It follows the service's events and shows "Offline" while the
   service is unreachable. The TUI shows the same columns when the service
-  runs and has the project registered.
+  runs and has the project registered. **Guide** in the top bar opens a
+  getting-started checklist: each step of a task's way through the
+  conveyor ticks itself from what the board shows, and **Show me** opens
+  the place where it happens; it opens by itself the first time a browser
+  shows the board. The board follows the system's light or dark setting;
+  its fonts (Red Hat Text and Mono, OFL) are served by taskmoor itself, so
+  it works offline and loads nothing from elsewhere.
 - **Config** `~/.config/taskmoor/config.toml` (projects, profiles with
   `harness`, `model`, `api_billing`, `sandbox`, `allowed_domains`,
   `default_profile`, `port`); **store**

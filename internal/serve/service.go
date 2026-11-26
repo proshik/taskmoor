@@ -194,6 +194,31 @@ func (e *NotFound) Error() string { return e.Msg }
 // claimed again since); this session must not touch it.
 var errNotOurs = errors.New("the task's claim is no longer this session's")
 
+// StoreLockWait is how long Open waits for the store's lock: a client
+// checking whether a service runs (Running, in every CLI command, an
+// agent's hook among them) holds it for a moment, a running service for
+// good.
+var StoreLockWait = time.Second
+
+// takeStoreLock takes the store's lock, waiting out a momentary holder
+// and an interrupted call; EWOULDBLOCK after StoreLockWait means another
+// service holds it.
+func takeStoreLock(f *os.File) error {
+	deadline := time.Now().Add(StoreLockWait)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		switch {
+		case err == nil:
+			return nil
+		case errors.Is(err, syscall.EINTR):
+			continue
+		case !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline):
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // Open prepares the service: it takes the store's lock (one service per
 // store), then recovers the sessions left by a previous run — their
 // processes are gone, so they are stale.
@@ -214,9 +239,12 @@ func Open(paths Paths, version string, env []string, home string) (*Service, err
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := takeStoreLock(lock); err != nil {
 		lock.Close()
-		return nil, fmt.Errorf("another taskmoor serve is running for %s", paths.Store)
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("another taskmoor serve is running for %s", paths.Store)
+		}
+		return nil, fmt.Errorf("lock %s: %w", lock.Name(), err)
 	}
 	j, err := newJournal(paths.Store)
 	if err != nil {
